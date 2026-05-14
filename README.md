@@ -4,14 +4,24 @@ Claude Code skill 加 Python 后端，分析 [Agora ConvoAI](https://www.agora.i
 
 ![dashboard preview](https://img.shields.io/badge/dashboard-ECharts-blue) ![python](https://img.shields.io/badge/python-3.10%2B-green) ![status](https://img.shields.io/badge/status-tested-success)
 
-## 安装
+## 安装（一行）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huang2he/agora-outbound-call-analysis/main/install.sh | bash
+```
+
+这条命令会：clone 到 `~/.claude/skills/agora-outbound-call-analysis`、建 `.venv`、pip install pandas + openpyxl。已装过的话再跑一次就是 `git pull` 更新。
+
+装好后 Claude Code 自动发现这个 skill（通过 `SKILL.md` 元数据），用中文说"分析这批外呼"或者甩 CSV 给 Claude 就会触发。
+
+### 手动安装（不想跑别人的 bash 脚本）
 
 ```bash
 git clone https://github.com/huang2he/agora-outbound-call-analysis \
   ~/.claude/skills/agora-outbound-call-analysis
+bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh path/to/any.csv
+# 第一次运行 run.sh 会自己建 venv
 ```
-
-装好后 Claude Code 会自动发现这个 skill（通过 `SKILL.md` 的元数据），用中文说"分析这批外呼"或者甩 CSV 给 Claude 就会触发。
 
 ## 直接用（不通过 Claude）
 
