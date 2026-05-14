@@ -103,7 +103,13 @@ cd ~/.claude/skills/agora-outbound-call-analysis && \
 
 xlsx 列：Call ID / Agent ID / Agent Name / Duration / Hangup Reason / Max turn_id / Assistant turns / Is Human / Is Full / Is Intent / Transcript（已渲染成 `role: content` 多行）/ Audio URL。
 
-**录音下载架构**：浏览器直接 fetch OSS URL 会被 CORS 拦死，所以走 `serve_dashboard.py` 起的 localhost 代理：浏览器 POST 一份 URL 清单到 `/audio-zip`，服务端用 Python `urllib` 拉文件（不受 CORS 约束）后流式打 zip 回浏览器。每次都是 **一个 zip 下载**，不会触发多文件弹窗或刷屏。
+**录音下载架构**：浏览器直接 fetch OSS URL 会被 CORS 拦死，所以走 `serve_dashboard.py` 起的 localhost 代理：
+
+- 浏览器构造一个**隐藏 iframe + form POST**，把 URL 清单 form-encode 后发到 `/audio-zip`。这样下载流由浏览器原生 download manager 接管，**JS 堆里不会攒整个 zip**（多 GB 也安全）
+- 服务端 16 worker 并行用 Python `urllib` 拉文件（不受 CORS 约束），用 `as_completed` 来一个写一个进 zip
+- zip 通过 `_NonSeekableWriter` 直接流式写到 HTTP response body（`zipfile` 检测 stream 不可 seek 时自动用 data descriptor 模式），**服务端常驻内存 ~16MB 不论批量多大**
+
+单次请求硬上限 **3000 通**（防 OOM / 防误点全量）。超过会返 HTTP 413 + 文字说明，浏览器侧从 iframe 内容里读到错误并 toast 提示。前端在 500 通时还会先 confirm 用户。
 
 `file://` 模式下 dashboard 仍能开，但音频导出按钮会变灰，弹窗提示需用 `serve_dashboard.py` 启动。Excel 导出始终可用。
 
@@ -130,13 +136,17 @@ xlsx 列：Call ID / Agent ID / Agent Name / Duration / Hangup Reason / Max turn
 
 行数能撑到 50k 以上不卡。**列**多少行不影响——脚本只按列名取需要的几列。
 
-**音频导出的实际瓶颈**：服务端用 8 worker 并行拉 OSS，每通约 0.8 秒。500 通 ~1 分钟；1000 通 ~2 分钟。zip 在内存里组装，所以单次导出超过 ~2000 通可能会 OOM。点导出时如果勾选音频 > 500 通会弹 `confirm()` 提醒，让用户先用漏斗 / 时长过滤缩小范围。
+**音频导出实测（16 worker 并行 + 流式 zip）**：
 
-典型工作流是 "点漏斗某层 / 某秒柱 → 几十到几百通"，不会撞到上限。
+- 37 通真实 OSS 录音：**6.7 秒**，55MB zip
+- 1500 通假 URL（全失败）：~5 分钟（DNS/连接超时累积）
+- 内存：服务端 RSS 稳定 ~155MB（zip 流式写出，不缓存）
+
+单次请求**硬上限 3000 通**，超量返 413。前端 500 通时先 `confirm()` 提醒。典型用户工作流是 "点漏斗某层 / 某秒柱 → 几十到几百通"，远低于上限。
 
 ## 已知限制 / v1 不做
 
 - 不调 LLM 看 transcript 内容做语义分析（如真意向 vs 软意向、TTS 错音）
 - 不做跨批对比（一次只吃一个文件）
 - 假定 Agent Name 是"批次标识"，按它分组；如果用户的导出里 Agent Name 没差异，按 Agent Name 拆的图就只有一组
-- 服务端音频 zip 是"全在内存里再发"，没做流式；几千通规模会 OOM。需要规模化的话下一版改 chunked transfer + 流式 zip
+- 服务端音频 zip 已是流式（zipfile + `_NonSeekableWriter`），但 form-encoded payload 还是一次性读到 server 内存里。10k+ URL 清单的 payload 也就 ~5MB JSON，影响不大
