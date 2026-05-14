@@ -51,10 +51,8 @@ if [ ! -d "$TARGET/.venv" ]; then
   "$TARGET/.venv/bin/pip" install -q pandas openpyxl
 fi
 
+printf '\n\033[1;32m✓\033[0m Installed to %s\n\n' "$TARGET"
 cat <<EOF
-
-\033[1;32m✓\033[0m Installed to $TARGET
-
 Next step — open the dashboard with any Agora ConvoAI summary CSV:
 
   bash $TARGET/scripts/run.sh path/to/summary.csv
