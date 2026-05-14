@@ -158,24 +158,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         regardless of total archive size, because each audio is written + freed
         immediately as its fetch completes.
         """
+        # Single Content-Disposition header: ASCII fallback + RFC 5987 unicode filename.
+        # RFC 6266 §5: if both filename and filename* are present, recipient MUST
+        # prefer filename*. Sending both in one header is the spec-compliant way to
+        # support non-ASCII names without breaking older clients.
+        encoded = urllib.parse.quote(zip_filename, safe="")
+        disp_header = (
+            f'attachment; filename="agora-export.zip"; '
+            f"filename*=UTF-8''{encoded}"
+        )
+
+        print(f"[audio-zip] START · {total_files} files · streaming to client", flush=True)
+
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
         # No Content-Length → HTTP/1.0 connection-close framing (handler default).
         # Browser still streams the body to its download manager.
-        disp_value = f'attachment; filename="agora-export.zip"'
-        try:
-            disp_value.encode("latin-1")
-            self.send_header("Content-Disposition", disp_value)
-        except UnicodeEncodeError:
-            self.send_header("Content-Disposition", _encode_header_safe(disp_value))
-        # Also stuff the actual desired filename in RFC 5987 form so non-ASCII names work.
-        encoded = urllib.parse.quote(zip_filename, safe="")
-        self.send_header(
-            "Content-Disposition",
-            f"attachment; filename=\"agora-export.zip\"; filename*=UTF-8''{encoded}",
-        )
+        self.send_header("Content-Disposition", disp_header)
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
         self.end_headers()
+        # Flush headers so the browser commits to "this is a download" before we
+        # start the long parallel fetch (otherwise the iframe / download UI can
+        # silently abandon the request).
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
 
         # Pre-collect tasks
         tasks: list[tuple[str, str]] = []  # (zip_path, url)
@@ -214,8 +223,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 zf.writestr("failed_downloads.txt", "\n".join(rows))
 
         elapsed = time.time() - t0
-        print(f"[audio-zip] streamed {total_files - len(failed)}/{total_files} files in {elapsed:.1f}s, "
-              f"{len(failed)} failed")
+        print(f"[audio-zip] DONE  · streamed {total_files - len(failed)}/{total_files} files "
+              f"in {elapsed:.1f}s, {len(failed)} failed", flush=True)
 
     # _build_zip removed — _stream_zip now writes directly into the HTTP response,
     # so we never hold the full archive in memory.
