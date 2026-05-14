@@ -278,8 +278,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agora 外呼分析 — {source}</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<!-- VENDOR_SCRIPTS -->
 <style>
   :root {{
     --bg: #f8fafc;
@@ -742,8 +741,7 @@ async function runExport(mode) {{
   setOptDisabled(true);
   progressWrap.style.display = 'block';
 
-  const totalAudio = groups.reduce((s, g) => s + g.audioRows.length, 0);
-  // ~0.8s per audio file with 8 parallel workers, plus 2s baseline for handshake/zip
+  // ~0.8s per audio file with 16 parallel workers, plus 2s baseline for handshake/zip
   const estimatedSec = Math.max(3, totalAudio * 0.8 + 2);
   const fakeTimer = startFakeProgress(estimatedSec, '服务端拉取录音中…');
 
@@ -1008,15 +1006,31 @@ def render_select_options(options: list[dict]) -> str:
     )
 
 
+def _vendor_scripts_block() -> str:
+    """Inline vendor JS if present, else fall back to CDN tags."""
+    vendor_dir = Path(__file__).resolve().parent.parent / "vendor"
+    libs = [("echarts.min.js", "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"),
+            ("xlsx.full.min.js", "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js")]
+    parts = []
+    for fname, cdn in libs:
+        local = vendor_dir / fname
+        if local.is_file():
+            parts.append(f"<script>/* {fname} (inlined) */\n{local.read_text(encoding='utf-8')}\n</script>")
+        else:
+            parts.append(f'<script src="{cdn}"></script>')
+    return "\n".join(parts)
+
+
 def build_html(df_enriched: pd.DataFrame, source: str) -> str:
     data = build_data(df_enriched)
-    return HTML_TEMPLATE.format(
+    html = HTML_TEMPLATE.format(
         source=source,
         total=len(df_enriched),
         n_agents=df_enriched["Agent Name"].nunique(),
         select_options=render_select_options(data["options"]),
         data_json=json.dumps(data, ensure_ascii=False),
     )
+    return html.replace("<!-- VENDOR_SCRIPTS -->", _vendor_scripts_block())
 
 
 # ---------- main ----------

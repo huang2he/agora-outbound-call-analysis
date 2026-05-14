@@ -29,6 +29,18 @@ if [ ! -d "$VENV" ]; then
   "$VENV/bin/pip" install -q pandas openpyxl
 fi
 
+# Vendor JS libs (echarts + xlsx). Inlining them into the generated HTML means
+# the dashboard works offline and survives CDN flakiness / GFW blocks.
+VENDOR="$SKILL_DIR/vendor"
+if [ ! -f "$VENDOR/echarts.min.js" ] || [ ! -f "$VENDOR/xlsx.full.min.js" ]; then
+  echo "[setup] caching ECharts + SheetJS to $VENDOR (one-time, ~2MB)" >&2
+  mkdir -p "$VENDOR"
+  curl -fsSL -o "$VENDOR/echarts.min.js"   https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js \
+    || echo "  WARN: echarts download failed; HTML will fall back to CDN tags" >&2
+  curl -fsSL -o "$VENDOR/xlsx.full.min.js" https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js \
+    || echo "  WARN: xlsx download failed; HTML will fall back to CDN tags" >&2
+fi
+
 if [ "${1:-}" = "--build" ]; then
   shift
   exec "$VENV/bin/python" "$HERE/build_dashboard.py" "$@"
