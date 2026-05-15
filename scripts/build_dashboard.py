@@ -175,7 +175,8 @@ def hangup_breakdown(df: pd.DataFrame) -> list[dict]:
     return out
 
 
-def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int) -> dict:
+def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
+               first_dur_x_max: int) -> dict:
     """All charts for one slice (全部 or single agent).
 
     Turn distribution is 真人接听内, so 完整转换/意向 series here are restricted to
@@ -187,9 +188,25 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int) -> dict:
 
     dur_labels, dur_human = duration_histogram(human["Duration (seconds)"], dur_x_max)
 
+    # 首句挂断 = 真人接听 且 assistant 轮数 == 1。看这部分通话的 Duration 分布，
+    # 直观看出 AI 第一句还没说完就被掐掉的比例。
+    first_sentence = human[human["_assistant_turns"] == 1]
+    first_dur_labels, first_dur_counts = duration_histogram(
+        first_sentence["Duration (seconds)"], first_dur_x_max
+    )
+
+    totals = funnel_counts(df_slice)
+
     return {
         "n": len(df_slice),
-        "totals": {"labels": FUNNEL_LABELS, "values": funnel_counts(df_slice)},
+        "totals": {"labels": FUNNEL_LABELS, "values": totals},
+        # Funnel denominators for the hero KPI percentages: 总 / 接听 / 真人接听.
+        # JS divides each numerator by these to produce the three percentage rows.
+        "denominators": {
+            "total": totals[0],
+            "answered": totals[1],
+            "human": totals[2],
+        },
         "turn_dist": {
             "x": list(range(1, turn_x_max + 1)),
             "series": [
@@ -203,6 +220,11 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int) -> dict:
             "series": [{"name": "真人接听", "data": dur_human}],
         },
         "early_hangup": early_hangup_rows(df_slice),
+        "first_sentence_dur": {
+            "x": first_dur_labels,
+            "data": first_dur_counts,
+            "n": len(first_sentence),
+        },
         "hangup_breakdown": hangup_breakdown(df_slice),
     }
 
@@ -238,13 +260,16 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
     # Compute global x-axis maxima once so cross-agent comparisons are aligned.
     human_all = df_enriched[df_enriched["_human"]]
     answered_all = df_enriched[df_enriched["_answered"]]
+    first_sent_all = human_all[human_all["_assistant_turns"] == 1]
     turn_x_max = max(int(human_all["_max_turn_id"].max()) if len(human_all) else 1, 1)
     dur_x_max = max(int(answered_all["Duration (seconds)"].max()) if len(answered_all) else 30, 30)
+    first_dur_x_max = max(int(first_sent_all["Duration (seconds)"].max()) if len(first_sent_all) else 10, 10)
 
     agents = sorted(df_enriched["Agent Name"].unique())
-    datasets = {ALL_KEY: slice_data(df_enriched, turn_x_max, dur_x_max)}
+    datasets = {ALL_KEY: slice_data(df_enriched, turn_x_max, dur_x_max, first_dur_x_max)}
     for a in agents:
-        datasets[a] = slice_data(df_enriched[df_enriched["Agent Name"] == a], turn_x_max, dur_x_max)
+        datasets[a] = slice_data(df_enriched[df_enriched["Agent Name"] == a],
+                                 turn_x_max, dur_x_max, first_dur_x_max)
 
     # Per-row export records. Each row carries `_agent`, `_human`, `_full`, `_intent`,
     # `_duration`, `_max_turn`, `_assistant_turns` so JS can filter without re-parsing.
@@ -300,55 +325,90 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-feature-settings: "tnum" 1;
     line-height: 1.5;
   }}
-  .wrap {{ max-width: 1320px; margin: 0 auto; padding: 28px 24px 64px; }}
-  header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 18px; flex-wrap: wrap; }}
-  h1 {{ font-size: 22px; margin: 0; letter-spacing: 0.2px; }}
+  .wrap {{ max-width: none; margin: 0; padding: 12px 14px 24px; }}
+  header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }}
+  h1 {{ font-size: 18px; margin: 0; letter-spacing: 0.2px; }}
   h1 .accent {{ color: var(--accent); }}
-  .meta {{ color: var(--muted); font-size: 13px; }}
-  .meta code {{ background: var(--panel-2); padding: 2px 8px; border-radius: 4px; color: var(--text); }}
+  .meta {{ color: var(--muted); font-size: 12px; }}
+  .meta code {{ background: var(--panel-2); padding: 1px 6px; border-radius: 3px; color: var(--text); }}
 
-  .controls {{ display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
-  .controls label {{ font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }}
-  select {{ font: inherit; font-size: 13px; padding: 6px 28px 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--text); appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M1 3l4 4 4-4' stroke='%2364748b' fill='none' stroke-width='1.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; min-width: 240px; }}
+  .controls {{ display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
+  .controls label {{ font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }}
+  select {{ font: inherit; font-size: 13px; padding: 5px 26px 5px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel); color: var(--text); appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M1 3l4 4 4-4' stroke='%2364748b' fill='none' stroke-width='1.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; min-width: 220px; }}
   select:focus {{ outline: 2px solid var(--accent); outline-offset: -1px; }}
 
-  h2 {{ font-size: 12px; font-weight: 600; color: var(--muted); margin: 26px 0 4px; text-transform: uppercase; letter-spacing: 0.8px; }}
-  .section-note {{ font-size: 12px; color: var(--muted); margin: 0 0 10px; line-height: 1.55; }}
+  h2 {{ font-size: 11px; font-weight: 600; color: var(--muted); margin: 14px 0 4px; text-transform: uppercase; letter-spacing: 0.7px; }}
+  .section-note {{ font-size: 11px; color: var(--muted); margin: 0 0 8px; line-height: 1.5; }}
   .section-note b {{ color: var(--text); font-weight: 600; }}
 
-  .stats {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }}
+  .stats {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }}
   @media (max-width: 900px) {{ .stats {{ grid-template-columns: repeat(2, 1fr); }} }}
-  .stat {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; position: relative; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
+
+  /* Hero+Funnel split: 5 KPI cards stacked on the left, funnel chart on the right */
+  .hero-funnel {{ display: grid; grid-template-columns: 340px 1fr; gap: 10px; align-items: stretch; }}
+  @media (max-width: 1100px) {{ .hero-funnel {{ grid-template-columns: 1fr; }} }}
+  .hero-funnel .stats {{ grid-template-columns: 1fr; gap: 8px; }}
+  .hero-funnel .stat {{ padding: 10px 14px; }}
+  .hero-funnel .stat .val {{ font-size: 24px; }}
+  .hero-funnel .funnel-wrap {{ display: flex; flex-direction: column; }}
+  .hero-funnel .funnel-wrap h2 {{ margin-top: 0; }}
+  .hero-funnel .funnel-wrap .card {{ flex: 1; }}
+  .hero-funnel .funnel-wrap .chart {{ height: 100%; min-height: 460px; }}
+  /* Tint each KPI card to match its slice color on the funnel:
+     拨打=blue · 接听=green · 真人=amber · 完整转换=cyan · 意向=purple.
+     Background is a very light wash of the accent so dark text stays readable. */
+  .stat {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; position: relative; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
   .stat::after {{ content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; }}
-  .stat:nth-child(1)::after {{ background: var(--accent); }}
-  .stat:nth-child(2)::after {{ background: #3b82f6; }}
-  .stat:nth-child(3)::after {{ background: var(--accent-4); }}
-  .stat:nth-child(4)::after {{ background: var(--accent-2); }}
-  .stat:nth-child(5)::after {{ background: var(--accent-3); }}
-  .stat .label {{ font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }}
-  .stat .val {{ font-size: 28px; font-weight: 700; margin-top: 6px; color: var(--text); }}
+  .stat:nth-child(1) {{ background: #eff6ff; border-color: #bfdbfe; }}
+  .stat:nth-child(1)::after {{ background: #2563eb; }}
+  .stat:nth-child(2) {{ background: #ecfdf5; border-color: #a7f3d0; }}
+  .stat:nth-child(2)::after {{ background: #10b981; }}
+  .stat:nth-child(3) {{ background: #fffbeb; border-color: #fde68a; }}
+  .stat:nth-child(3)::after {{ background: #f59e0b; }}
+  .stat:nth-child(4) {{ background: #ecfeff; border-color: #a5f3fc; }}
+  .stat:nth-child(4)::after {{ background: #06b6d4; }}
+  .stat:nth-child(5) {{ background: #faf5ff; border-color: #d8b4fe; }}
+  .stat:nth-child(5)::after {{ background: #a855f7; }}
+  .stat .label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }}
+  .stat .val {{ font-size: 26px; font-weight: 700; margin-top: 4px; color: var(--text); line-height: 1.1; }}
   .stat .pct {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
 
-  .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
-  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+  .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
+  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
   @media (max-width: 900px) {{ .grid-2 {{ grid-template-columns: 1fr; }} }}
 
-  .chart {{ width: 100%; height: 340px; }}
-  .chart.tall {{ height: 400px; }}
+  .chart {{ width: 100%; height: 320px; }}
+  .chart.tall {{ height: 380px; }}
 
   table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
   table th, table td {{ text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }}
   table th {{ background: var(--panel-2); color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; font-size: 11px; }}
   table tr:last-child td {{ border-bottom: none; }}
   table td.num {{ text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }}
-  table td.pct-bar {{ position: relative; }}
-  table td.pct-bar .bar {{ position: absolute; left: 12px; right: 12px; bottom: 4px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }}
-  table td.pct-bar .bar > div {{ height: 100%; background: var(--accent); }}
+  /* Excel-style data-bar: full-cell tinted fill from left up to the percentage,
+     thin right edge in the accent color, text floats on top right-aligned.
+     Replaces the previous 3px-thin bar at the bottom which looked detached. */
+  table td.pct-bar {{ position: relative; padding: 0; }}
+  table td.pct-bar .fill {{ position: absolute; left: 0; top: 4px; bottom: 4px; background: rgba(37, 99, 235, 0.13); border-right: 2px solid #2563eb; border-radius: 0 2px 2px 0; min-width: 2px; }}
+  table td.pct-bar .pct-text {{ position: relative; display: block; text-align: right; padding: 9px 12px; font-variant-numeric: tabular-nums; color: var(--text); }}
 
-  .defs {{ background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; color: var(--muted); font-size: 12px; }}
-  .defs code {{ background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--text); }}
+  .defs {{ background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--muted); font-size: 11px; margin-bottom: 8px; }}
+  .defs code {{ background: var(--panel-2); padding: 1px 5px; border-radius: 3px; color: var(--text); }}
 
   .empty {{ color: var(--muted); padding: 20px; text-align: center; font-size: 13px; }}
+
+  /* Percentages render on a single horizontal line, wrapping only when the card
+     is too narrow to fit all three (e.g. mobile). */
+  .stat .pcts {{ margin-top: 6px; display: flex; flex-wrap: wrap; gap: 2px 10px; align-items: baseline; }}
+  .stat .pcts > div {{ display: inline-flex; align-items: baseline; gap: 4px; }}
+  .stat .pcts .lbl {{ color: var(--muted); font-size: 11px; }}
+  .stat .pcts .num {{ color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; }}
+
+  .turn-card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); padding: 10px 14px 12px; margin-bottom: 8px; }}
+  .turn-card-title {{ margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--text); }}
+  .turn-card-body {{ display: grid; grid-template-columns: 2fr 1fr; gap: 10px; align-items: stretch; }}
+  @media (max-width: 900px) {{ .turn-card-body {{ grid-template-columns: 1fr; }} }}
+  .turn-card .chart {{ height: 240px; }}
 
   .export-hint {{ display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent); background: rgba(37,99,235,0.08); border: 1px solid rgba(37,99,235,0.2); padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }}
   .export-hint::before {{ content: "↓"; font-weight: 600; }}
@@ -396,31 +456,56 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   接听 = <code>Duration &gt; 0</code> · 真人接听 = <code>USER/AI_HANGUP</code> · 完整转换 = <code>Structured Output 无 null</code> · 意向 = <code>购车意向="是"</code> · N 句挂断 = <code>真人接听里 assistant 轮数恰好 = N</code>
 </div>
 
-<div class="stats" id="hero-stats"></div>
-
-<h2>1 · 漏斗 <span class="export-hint">点击层级导出</span></h2>
-<div class="card"><div id="chart-funnel" class="chart tall"></div></div>
+<div class="hero-funnel">
+  <div class="stats" id="hero-stats"></div>
+  <div class="funnel-wrap">
+    <h2>1 · 漏斗 <span class="export-hint">点击层级导出</span></h2>
+    <div class="card"><div id="chart-funnel" class="chart tall"></div></div>
+  </div>
+</div>
 
 <h2>2 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
-<p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号），用来看整通对话的"长度"。</p>
-<div class="card"><div id="chart-turn-dist" class="chart tall"></div></div>
+<p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号）。三张图分别看每个子集的轮次构成，左边柱状（绝对数量），右边环形（每根柱子在该子集里的占比）。</p>
+
+<div class="turn-card">
+  <h3 class="turn-card-title">真人接听 (全部)</h3>
+  <div class="turn-card-body">
+    <div class="turn-bar"><div id="chart-turn-human" class="chart"></div></div>
+    <div class="turn-donut"><div id="chart-turn-human-donut" class="chart"></div></div>
+  </div>
+</div>
+<div class="turn-card">
+  <h3 class="turn-card-title">完整转换</h3>
+  <div class="turn-card-body">
+    <div class="turn-bar"><div id="chart-turn-full" class="chart"></div></div>
+    <div class="turn-donut"><div id="chart-turn-full-donut" class="chart"></div></div>
+  </div>
+</div>
+<div class="turn-card">
+  <h3 class="turn-card-title">意向客户</h3>
+  <div class="turn-card-body">
+    <div class="turn-bar"><div id="chart-turn-intent" class="chart"></div></div>
+    <div class="turn-donut"><div id="chart-turn-intent-donut" class="chart"></div></div>
+  </div>
+</div>
 
 <h2>3 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>4 · 早期挂断 + Hangup Reason</h2>
+<h2>4 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
   <div class="card">
-    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">早期挂断（真人接听内 · 互斥分桶）<span class="export-hint">点行导出</span></h3>
-    <p class="section-note" style="margin:0 0 12px;">备注：<b>仅计算 agent 说话轮次</b>（不计真人那边）。这部分代表 <b>AI 表现不好 · 很快就被客户识破</b>。</p>
+    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
+    <p class="section-note" style="margin:0 0 12px;">备注：<b>仅计算 agent 说话轮次</b>。集中在前几句的部分代表 <b>AI 表现不好 · 很快被客户识破</b>。</p>
     <div id="early-hangup-table"></div>
   </div>
-  <div class="card"><div id="chart-hangup" class="chart"></div></div>
+  <div class="card">
+    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">首句挂断 · Duration 分布</h3>
+    <p class="section-note" style="margin:0 0 12px;">看"AI 刚说完第一句就被掐掉"的通话有多短。<b>横轴=秒</b>，柱高=该秒数挂断的通话数，<b>百分比相对首句挂断总数</b>。</p>
+    <div id="chart-first-sentence-dur" class="chart"></div>
+  </div>
 </div>
-
-<h2>5 · Hangup Reason 全分布</h2>
-<div class="card" id="hangup-table-wrap"></div>
 
 <div id="toast" class="toast"></div>
 
@@ -482,9 +567,20 @@ function tooltipBase(extra) {{
   }}, extra || {{}});
 }}
 
-const chartIds = ['chart-funnel', 'chart-turn-dist', 'chart-duration', 'chart-hangup'];
+const chartIds = ['chart-funnel',
+                  'chart-turn-human', 'chart-turn-human-donut',
+                  'chart-turn-full',  'chart-turn-full-donut',
+                  'chart-turn-intent','chart-turn-intent-donut',
+                  'chart-duration', 'chart-first-sentence-dur'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
+
+// Bar series name → corresponding subset filter for click-to-export.
+const TURN_SERIES = [
+  {{ key: 'human',  name: '真人接听 (全部)', barId: 'chart-turn-human',  donutId: 'chart-turn-human-donut',  color: '#2563eb', filter: r => r._human }},
+  {{ key: 'full',   name: '完整转换',        barId: 'chart-turn-full',   donutId: 'chart-turn-full-donut',   color: '#10b981', filter: r => r._human && r._full }},
+  {{ key: 'intent', name: '意向客户',        barId: 'chart-turn-intent', donutId: 'chart-turn-intent-donut', color: '#f59e0b', filter: r => r._human && r._intent }},
+];
 
 let currentAgentKey = DATA.all_key;
 
@@ -827,12 +923,36 @@ function turnTriple(turnId, scope) {{
   ];
 }}
 
-function renderHero(totals) {{
-  const total = totals.values[0] || 1;
+function renderHero(totals, denominators) {{
+  // Per-card denominator selection (per boss request):
+  //   0 拨打总数   — no percentages at all
+  //   1 接听       — only 占总
+  //   2 真人接听   — 占总 + 占接听
+  //   3 完整转换   — 占总 + 占接听 + 占真人
+  //   4 意向客户   — 占总 + 占接听 + 占真人
+  // Indices map to which denominator keys apply (rest hidden, not "—").
+  const DENS = {{
+    total:    {{ label: '占总',   value: denominators.total }},
+    answered: {{ label: '占接听', value: denominators.answered }},
+    human:    {{ label: '占真人', value: denominators.human }},
+  }};
+  const SHOW = [
+    [],                                  // 拨打总数
+    ['total'],                           // 接听
+    ['total', 'answered'],               // 真人接听
+    ['total', 'answered', 'human'],      // 完整转换
+    ['total', 'answered', 'human'],      // 意向客户
+  ];
   const html = totals.labels.map((label, i) => {{
     const v = totals.values[i];
-    const pct = i === 0 ? '&nbsp;' : `${{(v / total * 100).toFixed(1)}}% / 总`;
-    return `<div class="stat"><div class="label">${{label}}</div><div class="val">${{v}}</div><div class="pct">${{pct}}</div></div>`;
+    const keys = SHOW[i] || [];
+    const rows = keys.map(k => {{
+      const d = DENS[k];
+      if (!d || !d.value) return `<div><span class="lbl">${{d ? d.label : ''}}</span><span class="num">—</span></div>`;
+      const pct = (v / d.value * 100).toFixed(1);
+      return `<div><span class="lbl">${{d.label}}</span><span class="num">${{pct}}%</span></div>`;
+    }}).join('');
+    return `<div class="stat"><div class="label">${{label}}</div><div class="val">${{v}}</div><div class="pcts">${{rows}}</div></div>`;
   }}).join('');
   document.getElementById('hero-stats').innerHTML = html;
 }}
@@ -853,7 +973,7 @@ function renderFunnel(totals) {{
       type: 'funnel',
       sort: 'descending',
       gap: 4,
-      left: '10%', right: '10%', top: 16, bottom: 16,
+      left: '6%', right: '6%', top: '2%', bottom: '2%',
       label: {{
         show: true, position: 'inside', color: '#ffffff', fontWeight: 600,
         formatter: p => `${{p.data.name}}  ${{p.data.value}}`,
@@ -866,19 +986,83 @@ function renderFunnel(totals) {{
   }}, true);
 }}
 
-function renderTurnDist(td) {{
-  charts['chart-turn-dist'].setOption({{
-    color: PALETTE,
-    tooltip: tooltipBase({{ trigger: 'axis', axisPointer: {{ type: 'shadow' }} }}),
-    legend: {{ data: td.series.map(s => s.name), textStyle: {{ color: TEXT, fontSize: 12 }}, top: 8 }},
-    grid: baseGrid,
-    xAxis: Object.assign({{ type: 'category', name: 'max turn_id', data: td.x }}, baseAxis),
-    yAxis: Object.assign({{ type: 'value', name: '通话数' }}, baseAxis),
-    series: td.series.map(s => ({{
-      name: s.name, type: 'bar', data: s.data, barGap: 0, barCategoryGap: '30%',
-      itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
-    }})),
-  }}, true);
+function renderTurnTriad(td) {{
+  // Three independent cards (真人 / 完整转换 / 意向). Each card: left bar (absolute
+  // counts at each turn) + right donut (each bar's share of that subset's total).
+  TURN_SERIES.forEach((spec, i) => {{
+    const series = td.series[i];
+    const total = series.data.reduce((s, v) => s + v, 0) || 1;
+    // Trim trailing zeros so the visible bars fill the chart area instead of
+    // huddling on the left half. Each subset has its own tail length (真人接听
+    // typically goes furthest; 完整转换/意向 shorter), so cards stay independent.
+    let lastIdx = series.data.length - 1;
+    while (lastIdx > 0 && series.data[lastIdx] === 0) lastIdx--;
+    const xTrim = td.x.slice(0, lastIdx + 1);
+    const dataTrim = series.data.slice(0, lastIdx + 1);
+
+    // Bar
+    charts[spec.barId].setOption({{
+      color: [spec.color],
+      tooltip: tooltipBase({{
+        trigger: 'axis', axisPointer: {{ type: 'shadow' }},
+        formatter: params => {{
+          const p = params[0];
+          const pct = (p.value / total * 100).toFixed(1);
+          return `<b>turn_id ${{p.name}}</b><br>${{p.value}} 通 · ${{pct}}% / ${{spec.name.split(' ')[0]}}`;
+        }},
+      }}),
+      // Tight margins + containLabel = ECharts auto-fits the axis-label gutter
+      // and the plot fills the canvas. nameGap pulls the axis-name label closer.
+      grid: {{ left: 4, right: 8, top: 22, bottom: 4, containLabel: true }},
+      xAxis: Object.assign({{ type: 'category', name: 'max turn_id', data: xTrim,
+                              nameGap: 18,
+                              axisLabel: {{ color: MUTED, fontSize: 10, interval: 0,
+                                            rotate: xTrim.length > 18 ? 35 : 0 }} }}, baseAxis),
+      yAxis: Object.assign({{ type: 'value', name: `n=${{total}}`, nameGap: 8 }}, baseAxis),
+      series: [{{
+        name: spec.name, type: 'bar', data: dataTrim,
+        itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
+        label: {{
+          show: true, position: 'top', color: MUTED, fontSize: 10,
+          formatter: p => p.value > 0 ? `${{(p.value / total * 100).toFixed(0)}}%` : '',
+        }},
+      }}],
+    }}, true);
+
+    // Donut: each non-zero turn bin is a slice, percentage relative to subset total.
+    // Title placed in the donut hole shows the subset's grand total (n).
+    const slices = series.data
+      .map((v, j) => ({{ name: `${{td.x[j]}} 轮`, value: v }}))
+      .filter(d => d.value > 0);
+    charts[spec.donutId].setOption({{
+      color: [spec.color, '#60a5fa', '#a855f7', '#06b6d4', '#10b981', '#f43f5e', '#f59e0b', '#0ea5e9', '#a3e635', '#fb7185'],
+      title: {{
+        text: `${{total}}`,
+        subtext: '通',
+        left: '50%', top: '48%',
+        textAlign: 'center', textVerticalAlign: 'middle',
+        textStyle: {{ fontSize: 22, fontWeight: 700, color: TEXT }},
+        subtextStyle: {{ fontSize: 11, color: MUTED }},
+        itemGap: 2,
+      }},
+      tooltip: tooltipBase({{
+        trigger: 'item',
+        formatter: p => `<b>${{p.name}}</b><br>${{p.value}} 通 · ${{p.percent.toFixed(1)}}%`,
+      }}),
+      legend: {{ show: false }},
+      series: [{{
+        type: 'pie', radius: ['52%', '74%'], center: ['50%', '52%'],
+        avoidLabelOverlap: true,
+        itemStyle: {{ borderColor: '#ffffff', borderWidth: 1.5 }},
+        label: {{
+          color: TEXT, fontSize: 11,
+          formatter: p => p.percent >= 4 ? `${{p.name}}\\n${{p.percent.toFixed(0)}}%` : '',
+        }},
+        labelLine: {{ length: 6, length2: 4, lineStyle: {{ color: MUTED }} }},
+        data: slices,
+      }}],
+    }}, true);
+  }});
 }}
 
 function renderDuration(dd) {{
@@ -888,8 +1072,7 @@ function renderDuration(dd) {{
       trigger: 'axis', axisPointer: {{ type: 'shadow' }},
       formatter: params => {{
         const p = params[0];
-        const start = parseInt(p.name, 10);
-        return `<b>${{start}}-${{start + 4}} 秒</b><br>${{p.seriesName}}: <b>${{p.value}}</b> 通`;
+        return `<b>${{p.name}} 秒</b><br>${{p.seriesName}}: <b>${{p.value}}</b> 通`;
       }},
     }}),
     legend: {{ data: dd.series.map(s => s.name), textStyle: {{ color: TEXT, fontSize: 12 }}, top: 8 }},
@@ -908,23 +1091,44 @@ function renderDuration(dd) {{
   }}, true);
 }}
 
-function renderHangup(rows) {{
-  if (!rows.length) {{
-    charts['chart-hangup'].clear();
+function renderFirstSentenceDur(fd) {{
+  if (!fd || !fd.n) {{
+    charts['chart-first-sentence-dur'].clear();
+    charts['chart-first-sentence-dur'].setOption({{
+      title: {{ text: '无首句挂断数据', left: 'center', top: 'middle',
+                textStyle: {{ color: MUTED, fontSize: 12, fontWeight: 'normal' }} }},
+    }});
     return;
   }}
-  charts['chart-hangup'].setOption({{
-    color: PALETTE,
-    tooltip: tooltipBase({{ trigger: 'item', formatter: p => `<b>${{p.data.name}}</b><br>${{p.data.value}} 通 · ${{p.percent.toFixed(1)}}%` }}),
+  const total = fd.n;
+  // Truncate trailing zero tail for readability — find the last second with data.
+  let lastIdx = fd.data.length - 1;
+  while (lastIdx > 0 && fd.data[lastIdx] === 0) lastIdx--;
+  const x = fd.x.slice(0, lastIdx + 1);
+  const data = fd.data.slice(0, lastIdx + 1);
+
+  charts['chart-first-sentence-dur'].setOption({{
+    color: ['#f43f5e'],
+    tooltip: tooltipBase({{
+      trigger: 'axis', axisPointer: {{ type: 'shadow' }},
+      formatter: params => {{
+        const p = params[0];
+        const pct = (p.value / total * 100).toFixed(1);
+        return `<b>${{p.name}} 秒</b><br>${{p.value}} 通 · ${{pct}}% / 首句挂断 (n=${{total}})`;
+      }},
+    }}),
+    grid: {{ left: 48, right: 16, top: 28, bottom: 36, containLabel: true }},
+    xAxis: Object.assign({{ type: 'category', name: '秒', data: x,
+                            axisLabel: {{ color: MUTED, fontSize: 10, interval: 0,
+                                          rotate: x.length > 15 ? 35 : 0 }} }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: `通话数 (n=${{total}})` }}, baseAxis),
     series: [{{
-      type: 'pie',
-      radius: ['42%', '72%'],
-      center: ['50%', '52%'],
-      avoidLabelOverlap: true,
-      itemStyle: {{ borderColor: '#ffffff', borderWidth: 2 }},
-      label: {{ color: TEXT, fontSize: 11, formatter: '{{b}}\\n{{c}} · {{d}}%' }},
-      labelLine: {{ lineStyle: {{ color: MUTED }} }},
-      data: rows.map(r => ({{ name: r.reason, value: r.count }})),
+      name: '首句挂断', type: 'bar', data,
+      itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
+      label: {{
+        show: true, position: 'top', color: MUTED, fontSize: 10,
+        formatter: p => p.value > 0 ? `${{(p.value / total * 100).toFixed(0)}}%` : '',
+      }},
     }}],
   }}, true);
 }}
@@ -933,7 +1137,10 @@ function renderEarlyHangupTable(rows) {{
   const el = document.getElementById('early-hangup-table');
   if (!rows.length) {{ el.innerHTML = '<div class="empty">无真人接听数据</div>'; return; }}
   el.innerHTML = `<table><thead><tr><th>类别</th><th style="text-align:right;">数量</th><th style="text-align:right;">占真人接听</th></tr></thead><tbody>${{
-    rows.map((r, i) => `<tr class="clickable" data-n="${{i+1}}"><td>${{r.label}}</td><td class="num">${{r.count}}</td><td class="num pct-bar">${{r.pct}}%<div class="bar"><div style="width:${{Math.min(r.pct, 100)}}%;"></div></div></td></tr>`).join('')
+    rows.map((r, i) => {{
+      const w = Math.min(r.pct, 100);
+      return `<tr class="clickable" data-n="${{i+1}}"><td>${{r.label}}</td><td class="num">${{r.count}}</td><td class="pct-bar"><div class="fill" style="width:${{w}}%;"></div><span class="pct-text">${{r.pct}}%</span></td></tr>`;
+    }}).join('')
   }}</tbody></table>`;
   el.querySelectorAll('tr.clickable').forEach(tr => {{
     tr.addEventListener('click', () => {{
@@ -944,23 +1151,14 @@ function renderEarlyHangupTable(rows) {{
   }});
 }}
 
-function renderHangupTable(rows) {{
-  const el = document.getElementById('hangup-table-wrap');
-  if (!rows.length) {{ el.innerHTML = '<div class="empty">无数据</div>'; return; }}
-  el.innerHTML = `<table><thead><tr><th>Hangup Reason</th><th style="text-align:right;">数量</th><th style="text-align:right;">占总</th></tr></thead><tbody>${{
-    rows.map(r => `<tr><td><code style="background:var(--panel-2); padding:2px 6px; border-radius:4px; font-size:11px;">${{r.reason}}</code></td><td class="num">${{r.count}}</td><td class="num pct-bar">${{r.pct}}%<div class="bar"><div style="width:${{Math.min(r.pct, 100)}}%;"></div></div></td></tr>`).join('')
-  }}</tbody></table>`;
-}}
-
 function render(key) {{
   const d = DATA.datasets[key];
-  renderHero(d.totals);
+  renderHero(d.totals, d.denominators);
   renderFunnel(d.totals);
-  renderTurnDist(d.turn_dist);
+  renderTurnTriad(d.turn_dist);
   renderDuration(d.duration_dist);
-  renderHangup(d.hangup_breakdown);
   renderEarlyHangupTable(d.early_hangup);
-  renderHangupTable(d.hangup_breakdown);
+  renderFirstSentenceDur(d.first_sentence_dur);
 }}
 
 const sel = document.getElementById('agent-select');
@@ -976,12 +1174,15 @@ charts['chart-funnel'].on('click', p => {{
   exportRows(rows, hint);
 }});
 
-charts['chart-turn-dist'].on('click', p => {{
-  if (p.componentType !== 'series') return;
-  // Whichever series the user clicked, the export covers all three categories
-  // at that turn_id (true 真人接听 / 完整转换 / 意向客户 within human).
-  const turnId = parseInt(p.name, 10);
-  exportTurnTriple(turnId);
+// Each of the three turn-distribution bar charts: clicking a bar exports just
+// that subset at that turn_id (no triple bundle — the cards are already split).
+TURN_SERIES.forEach(spec => {{
+  charts[spec.barId].on('click', p => {{
+    if (p.componentType !== 'series') return;
+    const turnId = parseInt(p.name, 10);
+    const subset = scopedRows().filter(spec.filter).filter(r => r._max_turn === turnId);
+    exportRows(subset, `turn-${{spec.key}}-id${{turnId}}`);
+  }});
 }});
 
 charts['chart-duration'].on('click', p => {{
@@ -994,6 +1195,19 @@ charts['chart-duration'].on('click', p => {{
 window.addEventListener('resize', () => {{
   Object.values(charts).forEach(c => c.resize());
 }});
+
+// ECharts locks the canvas size at init() time. Flex/grid layouts (like the
+// hero+funnel split where the funnel card stretches to match the left KPI
+// column) can grow the container after init, leaving empty space below the
+// chart. ResizeObserver fires whenever the chart's host div changes size and
+// triggers an echarts resize so the visualization fills its container.
+const _chartRO = new ResizeObserver(entries => {{
+  for (const entry of entries) {{
+    const inst = echarts.getInstanceByDom(entry.target);
+    if (inst) inst.resize();
+  }}
+}});
+Object.values(charts).forEach(c => {{ try {{ _chartRO.observe(c.getDom()); }} catch (e) {{}} }});
 </script>
 </body>
 </html>
