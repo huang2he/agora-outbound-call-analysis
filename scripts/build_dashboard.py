@@ -91,15 +91,16 @@ def max_turn_id(transcript: list[dict]) -> int:
 
 
 # Conversion slot model (locked with user):
-# 4 slots — 车型 / 时间 / 城市 / 姓名. "车型" is satisfied iff 购车型号 is filled
-# (品牌 alone does NOT count; 型号 alone or both = OK). Intent (购车意向) is NOT a
-# conversion slot — it's a separate funnel branch.
+# 4 slots — 车型 / 时间 / 城市 / 姓名. 车型 槽 is satisfied if EITHER 购车品牌 OR
+# 购车型号 is non-null (they're conceptually linked — either alone is enough to
+# pass the lead to a 4S 店, since 4S 店 can clarify on follow-up). Intent
+# (购车意向) is NOT a conversion slot — it's a separate funnel branch.
 CONVERSION_SLOT_NAMES = ["车型", "时间", "城市", "姓名"]
-CONVERSION_SLOT_FIELDS = {
-    "车型": "购车型号",
-    "时间": "购车时间",
-    "城市": "购车城市",
-    "姓名": "购车姓名",
+CONVERSION_SLOT_FIELDS: dict[str, list[str]] = {
+    "车型": ["购车品牌", "购车型号"],   # any one non-null → slot filled
+    "时间": ["购车时间"],
+    "城市": ["购车城市"],
+    "姓名": ["购车姓名"],
 }
 FULL_CONVERSION_MIN = 3  # ≥ 3 of 4 slots filled → counts as 完整转换
 
@@ -112,8 +113,10 @@ def filled_slots(structured: dict | None) -> list[str]:
     """Return the names of the conversion slots that are filled in this row."""
     if not structured:
         return []
-    return [name for name in CONVERSION_SLOT_NAMES
-            if _val_filled(structured.get(CONVERSION_SLOT_FIELDS[name]))]
+    return [
+        name for name in CONVERSION_SLOT_NAMES
+        if any(_val_filled(structured.get(f)) for f in CONVERSION_SLOT_FIELDS[name])
+    ]
 
 
 def is_full_conversion(structured: dict | None) -> bool:
@@ -162,13 +165,12 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- metric extraction ----------
 
-FUNNEL_LABELS = ["拨打总数", "接听", "真人接听", "完整转换", "带车型完整转换", "意向客户"]
+FUNNEL_LABELS = ["拨打总数", "真人接听", "完整转换", "带车型完整转换", "意向客户"]
 
 
 def funnel_counts(df: pd.DataFrame) -> list[int]:
     return [
         len(df),
-        int(df["_answered"].sum()),
         int(df["_human"].sum()),
         int(df["_full"].sum()),
         int(df["_full_with_model"].sum()),
@@ -267,13 +269,12 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
     return {
         "n": len(df_slice),
         "totals": {"labels": FUNNEL_LABELS, "values": totals},
-        # Funnel denominators for the hero KPI percentages: 总 / 接听 / 真人接听 / 完整转换.
-        # JS divides each numerator by the relevant denominators per card.
+        # Funnel denominators for the hero KPI percentages: 总 / 真人 / 完整转换.
+        # 接听 was removed from the funnel since for these batches it's ~ same as 拨打.
         "denominators": {
             "total": totals[0],
-            "answered": totals[1],
-            "human": totals[2],
-            "full": totals[3],
+            "human": totals[1],
+            "full": totals[2],
         },
         "turn_dist": {
             "x": list(range(1, turn_x_max + 1)),
@@ -422,7 +423,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .section-note {{ font-size: 11px; color: var(--muted); margin: 0 0 8px; line-height: 1.5; }}
   .section-note b {{ color: var(--text); font-weight: 600; }}
 
-  .stats {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }}
+  .stats {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }}
   @media (max-width: 900px) {{ .stats {{ grid-template-columns: repeat(2, 1fr); }} }}
 
   /* Hero+Funnel split: 5 KPI cards stacked on the left, funnel chart on the right */
@@ -436,22 +437,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .hero-funnel .funnel-wrap .card {{ flex: 1; }}
   .hero-funnel .funnel-wrap .chart {{ height: 100%; min-height: 460px; }}
   /* Tint each KPI card to match its slice color on the funnel:
-     拨打=blue · 接听=green · 真人=amber · 完整转换=cyan · 意向=purple.
-     Background is a very light wash of the accent so dark text stays readable. */
+     拨打=blue · 真人=amber · 完整=cyan · 带车型完整=teal · 意向=purple. */
   .stat {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; position: relative; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
   .stat::after {{ content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; }}
   .stat:nth-child(1) {{ background: #eff6ff; border-color: #bfdbfe; }}
   .stat:nth-child(1)::after {{ background: #2563eb; }}
-  .stat:nth-child(2) {{ background: #ecfdf5; border-color: #a7f3d0; }}
-  .stat:nth-child(2)::after {{ background: #10b981; }}
-  .stat:nth-child(3) {{ background: #fffbeb; border-color: #fde68a; }}
-  .stat:nth-child(3)::after {{ background: #f59e0b; }}
-  .stat:nth-child(4) {{ background: #ecfeff; border-color: #a5f3fc; }}
-  .stat:nth-child(4)::after {{ background: #06b6d4; }}
-  .stat:nth-child(5) {{ background: #f0fdfa; border-color: #99f6e4; }}
-  .stat:nth-child(5)::after {{ background: #14b8a6; }}
-  .stat:nth-child(6) {{ background: #faf5ff; border-color: #d8b4fe; }}
-  .stat:nth-child(6)::after {{ background: #a855f7; }}
+  .stat:nth-child(2) {{ background: #fffbeb; border-color: #fde68a; }}
+  .stat:nth-child(2)::after {{ background: #f59e0b; }}
+  .stat:nth-child(3) {{ background: #ecfeff; border-color: #a5f3fc; }}
+  .stat:nth-child(3)::after {{ background: #06b6d4; }}
+  .stat:nth-child(4) {{ background: #f0fdfa; border-color: #99f6e4; }}
+  .stat:nth-child(4)::after {{ background: #14b8a6; }}
+  .stat:nth-child(5) {{ background: #faf5ff; border-color: #d8b4fe; }}
+  .stat:nth-child(5)::after {{ background: #a855f7; }}
   .stat .label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }}
   .stat .val {{ font-size: 26px; font-weight: 700; margin-top: 4px; color: var(--text); line-height: 1.1; }}
   .stat .pct {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
@@ -645,7 +643,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
 <h2>4 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
-<p class="section-note">备注：4 个槽位 — <b>车型 (购车型号)</b> · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。注意"车型"槽：<b>只有品牌没有型号不算填齐</b>；有型号（不管有没有品牌）就算填齐。购车意向 不计入槽位，是独立漏斗分支。</p>
+<p class="section-note">备注：4 个槽位 — <b>车型</b> (购车品牌 或 购车型号 任一非 null) · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
     <div class="turn-bar"><div id="chart-field-count" class="chart"></div></div>
@@ -739,7 +737,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 const DATA = {data_json};
 
-const PALETTE = ['#2563eb', '#10b981', '#f59e0b', '#06b6d4', '#14b8a6', '#a855f7', '#f43f5e', '#0ea5e9'];
+// Funnel slot colors in label order (blue/amber/cyan/teal/purple). Green (#10b981)
+// is pushed past the funnel since 接听 was removed.
+const PALETTE = ['#2563eb', '#f59e0b', '#06b6d4', '#14b8a6', '#a855f7', '#10b981', '#f43f5e', '#0ea5e9'];
 const TEXT = '#0f172a';
 const MUTED = '#64748b';
 const BORDER = '#e2e8f0';
@@ -1100,8 +1100,8 @@ function exportTurnTriple(turnId) {{
 // Single-group filters
 const FILTERS = {{
   funnel: (idx, scope) => {{
-    const fns = [r => true, r => r._answered, r => r._human, r => r._full, r => r._full_with_model, r => r._intent];
-    return [scope.filter(fns[idx]), `funnel-${{['all','answered','human','full','full-with-model','intent'][idx]}}`];
+    const fns = [r => true, r => r._human, r => r._full, r => r._full_with_model, r => r._intent];
+    return [scope.filter(fns[idx]), `funnel-${{['all','human','full','full-with-model','intent'][idx]}}`];
   }},
   duration: (sec, scope) => {{
     return [scope.filter(r => r._human && r._duration === sec), `duration-${{sec}}s`];
@@ -1130,18 +1130,16 @@ function renderHero(totals, denominators) {{
   //   4 意向客户   — 占总 + 占接听 + 占真人
   // Indices map to which denominator keys apply (rest hidden, not "—").
   const DENS = {{
-    total:    {{ label: '占总',   value: denominators.total }},
-    answered: {{ label: '占接听', value: denominators.answered }},
-    human:    {{ label: '占真人', value: denominators.human }},
-    full:     {{ label: '占完整', value: denominators.full }},
+    total: {{ label: '占总',   value: denominators.total }},
+    human: {{ label: '占真人', value: denominators.human }},
+    full:  {{ label: '占完整', value: denominators.full }},
   }};
   const SHOW = [
-    [],                                          // 0 拨打总数
-    ['total'],                                   // 1 接听
-    ['total', 'answered'],                       // 2 真人接听
-    ['total', 'answered', 'human'],              // 3 完整转换
-    ['total', 'answered', 'human', 'full'],      // 4 带车型完整转换
-    ['total', 'answered', 'human'],              // 5 意向客户
+    [],                              // 0 拨打总数
+    ['total'],                       // 1 真人接听
+    ['total', 'human'],              // 2 完整转换
+    ['total', 'human', 'full'],      // 3 带车型完整转换
+    ['total', 'human'],              // 4 意向客户
   ];
   const html = totals.labels.map((label, i) => {{
     const v = totals.values[i];
