@@ -40,6 +40,28 @@ bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh <input.csv-or-
 
 启动后自动打开浏览器到 `http://127.0.0.1:<port>/`，**端口策略**：先试 `--port` 指定的（默认 8765），冲突时直接让 OS 分配一个空闲端口（绑在实际 HTTPServer 上，无 TOCTOU 漏洞）。终端 Ctrl+C 停服。
 
+### 开局域网访问（让同事在公司 Wi-Fi 上看）
+
+加 `--host 0.0.0.0`：
+
+```bash
+bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh <input.csv> --host 0.0.0.0
+```
+
+启动时会列出所有非 loopback 的 IPv4，比如：
+
+```
+LAN access:  (挑一个发给同事，VPN / 公司 Wi-Fi 用不同 IP)
+  http://10.103.1.131:8765/    ← 公司 Wi-Fi 走这个
+  http://28.0.0.1:8765/        ← VPN 接口（同事得连同一 VPN）
+```
+
+把对应的 IP+port 发给同事即可。**注意：**
+
+- macOS 首次会弹防火墙提示，点"允许"
+- 服务没做 auth，谁 reach 这个 IP 谁就能看完整 dashboard + transcript + 音频。**别贴到外网**
+- 关掉终端 / Ctrl+C 服务就停了
+
 只要静态 HTML（不需要下载录音、可分发给同事）：
 
 ```bash

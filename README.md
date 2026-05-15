@@ -26,14 +26,19 @@ bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh path/to/any.cs
 ## 直接用（不通过 Claude）
 
 ```bash
-# 起 dashboard 服务（第一次会自动建 venv + pip install，约 15 秒）
+# 本机访问（默认 loopback 仅自己可见）
 bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh path/to/summary.csv
 
-# 只要离线 HTML，不需要下载录音
+# 局域网访问（同事在同一 Wi-Fi 可看）— 启动会列出可用 LAN IP
+bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh path/to/summary.csv --host 0.0.0.0
+
+# 只要离线 HTML（不需要下载录音 / LAN）
 bash ~/.claude/skills/agora-outbound-call-analysis/scripts/run.sh --build path/to/summary.csv -o dashboard.html
 ```
 
 浏览器会自动打开 `http://127.0.0.1:<port>/`。终端 Ctrl+C 停服。
+
+**LAN 模式注意：** 服务没做 auth，谁能 reach 这个 IP 谁就能看完整 dashboard + transcript + 音频。**别贴到外网**。macOS 首次会弹防火墙提示，点"允许"。
 
 ## 输入格式
 

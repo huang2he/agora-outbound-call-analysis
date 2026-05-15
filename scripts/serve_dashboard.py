@@ -19,6 +19,7 @@ import base64
 import http.server
 import io
 import json
+import os
 import socket
 import socketserver
 import sys
@@ -41,6 +42,187 @@ MAX_FILES_PER_REQUEST = 3000
 # Parallel workers for OSS fetches. 16 saturates typical home/office bandwidth.
 FETCH_WORKERS = 16
 
+# LLM config — read once at startup from env vars or ~/.config/<skill>/env. Kept
+# outside the repo so the API key never gets committed.
+LLM_CONFIG_PATHS = [
+    Path.home() / ".config" / "agora-outbound-call-analysis" / "env",
+    Path.home() / ".config" / "agora-skill" / "env",
+]
+
+
+def _load_llm_env() -> dict[str, str]:
+    """Read KEY=VALUE lines from the config files (last writer wins) and overlay
+    real env vars on top. Returns dict — never raises if files are missing."""
+    out: dict[str, str] = {}
+    for path in LLM_CONFIG_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception as e:  # noqa: BLE001
+            print(f"[llm] failed to read {path}: {e}", flush=True)
+    for k in ("DASHSCOPE_API_KEY", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"):
+        if k in os.environ:
+            out[k] = os.environ[k]
+    return out
+
+
+LLM_ENV = _load_llm_env()
+LLM_BASE_URL = LLM_ENV.get("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+LLM_MODEL = LLM_ENV.get("LLM_MODEL", "qwen-plus")
+LLM_API_KEY = LLM_ENV.get("LLM_API_KEY") or LLM_ENV.get("DASHSCOPE_API_KEY") or ""
+
+LLM_WORKERS = 16  # higher concurrency = ~2x throughput vs 8; rate-limited by DashScope quotas
+
+# Auto-job state — set once on server start, modified by background workers.
+# Browser polls /llm-intent-status to render progress + final results.
+LLM_JOB = {
+    "status": "idle",   # idle | running | done | error | skipped
+    "total": 0,
+    "done": 0,
+    "results": [],
+    "model": "",
+    "started_at": None,
+    "elapsed_s": 0,
+    "error": None,
+}
+LLM_JOB_LOCK = threading.Lock()
+
+INTENT_PROMPT_SYSTEM = (
+    "你是外呼通话质检员。给你一通已经被规则判为「购车意向=是」的通话，"
+    "你要进一步判断这个客户是真有购买意向还是只是客气敷衍。"
+)
+
+INTENT_PROMPT_TEMPLATE = """【收集到的结构化字段】
+{structured}
+
+【完整 transcript】
+{transcript}
+
+判断规则：
+- "真意向"：客户主动给具体信息（品牌/车型/时间/城市/预算/手机尾号等），主动问价格/优惠/4S 店地址，明确同意接 4S 店回电
+- "假意向"：客户只有"好的""考虑一下""有需要会联系""挺好的"这种敷衍话术，没有给出可验证的具体动作或承诺
+- "模糊"：既没明显敷衍也没明确承诺，难以判断
+
+只输出 JSON，schema 严格如下，不要加任何 markdown 围栏：
+{{"verdict": "真意向" | "假意向" | "模糊", "reason": "≤30 字依据", "evidence": "客户原话证据 ≤ 50 字"}}
+"""
+
+
+def _judge_one(call: dict) -> dict:
+    """One LLM judgement keyed by call_id. Used by both /llm-intent-check
+    (synchronous) and the background auto-job."""
+    r = _call_llm(call.get("transcript", ""), call.get("structured"))
+    return {"call_id": call.get("call_id", ""), **r}
+
+
+def kickoff_intent_job(df_enriched) -> None:
+    """Fire-and-forget LLM judgement of every intent call. Runs in a daemon
+    thread so the HTTP server can start serving immediately."""
+    intent_df = df_enriched[df_enriched["_intent"]]
+    n = len(intent_df)
+    with LLM_JOB_LOCK:
+        LLM_JOB["model"] = LLM_MODEL
+        LLM_JOB["results"] = []
+        LLM_JOB["done"] = 0
+        LLM_JOB["total"] = n
+        LLM_JOB["started_at"] = time.time()
+        LLM_JOB["elapsed_s"] = 0
+        LLM_JOB["error"] = None
+        if n == 0:
+            LLM_JOB["status"] = "done"
+            return
+        if not LLM_API_KEY:
+            LLM_JOB["status"] = "skipped"
+            LLM_JOB["error"] = ("LLM_API_KEY 未配置。在 "
+                                "~/.config/agora-outbound-call-analysis/env 里写 "
+                                "DASHSCOPE_API_KEY=... 然后重启服务即可启用自动分析。")
+            return
+        LLM_JOB["status"] = "running"
+
+    calls = [
+        {
+            "call_id": r.get("Call ID", ""),
+            "transcript": transcript_readable(r["_transcript"]),
+            "structured": r["_structured"],
+        }
+        for _, r in intent_df.iterrows()
+    ]
+
+    def runner():
+        t0 = time.time()
+        try:
+            with ThreadPoolExecutor(max_workers=LLM_WORKERS) as ex:
+                futures = [ex.submit(_judge_one, c) for c in calls]
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    with LLM_JOB_LOCK:
+                        LLM_JOB["results"].append(res)
+                        LLM_JOB["done"] = len(LLM_JOB["results"])
+                        LLM_JOB["elapsed_s"] = round(time.time() - t0, 1)
+            with LLM_JOB_LOCK:
+                LLM_JOB["status"] = "done"
+                LLM_JOB["elapsed_s"] = round(time.time() - t0, 1)
+            print(f"[llm-intent-auto] DONE {LLM_JOB['done']}/{LLM_JOB['total']} "
+                  f"in {LLM_JOB['elapsed_s']}s · model={LLM_MODEL}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            with LLM_JOB_LOCK:
+                LLM_JOB["status"] = "error"
+                LLM_JOB["error"] = str(e)[:300]
+            traceback.print_exc()
+
+    threading.Thread(target=runner, daemon=True, name="llm-intent-auto").start()
+    print(f"[llm-intent-auto] START · {n} intent calls · model={LLM_MODEL} "
+          f"· {LLM_WORKERS} workers", flush=True)
+
+
+def _call_llm(transcript: str, structured: dict | None) -> dict:
+    """One LLM call. Returns parsed JSON dict or {error: ...} on failure."""
+    if not LLM_API_KEY:
+        return {"error": "LLM_API_KEY 未配置 (~/.config/agora-outbound-call-analysis/env)"}
+
+    struct_str = json.dumps(structured, ensure_ascii=False, indent=2) if structured else "(无)"
+    # Cap transcript size to keep prompt reasonable. ~3000 chars covers most outbound calls.
+    trans = transcript[:3000] + ("\n...(已截断)" if len(transcript) > 3000 else "")
+    user_msg = INTENT_PROMPT_TEMPLATE.format(structured=struct_str, transcript=trans)
+
+    body = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": INTENT_PROMPT_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        content = payload["choices"][0]["message"]["content"]
+        return json.loads(content)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        return {"error": f"HTTP {e.code}: {err_body[:200]}"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:200]}
+
 
 class _NonSeekableWriter:
     """Forces zipfile into streaming mode (data descriptors) by hiding tell/seek.
@@ -58,7 +240,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from build_dashboard import load_table, enrich, build_html  # noqa: E402
+from build_dashboard import load_table, enrich, build_html, transcript_readable  # noqa: E402
 
 
 HTML_BYTES = b""  # populated in main()
@@ -112,13 +294,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, HTML_BYTES, "text/html; charset=utf-8")
         elif self.path == "/healthz":
             self._send(200, b"ok", "text/plain")
+        elif self.path == "/llm-intent-status":
+            with LLM_JOB_LOCK:
+                snap = {
+                    "status": LLM_JOB["status"],
+                    "total": LLM_JOB["total"],
+                    "done": LLM_JOB["done"],
+                    "results": list(LLM_JOB["results"]),
+                    "elapsed_s": LLM_JOB["elapsed_s"],
+                    "error": LLM_JOB["error"],
+                    "model": LLM_JOB["model"],
+                }
+            payload = json.dumps(snap, ensure_ascii=False).encode("utf-8")
+            self._send(200, payload, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain")
 
     def do_POST(self):  # noqa: N802
-        if self.path != "/audio-zip":
-            self._send(404, b"not found", "text/plain")
-            return
+        if self.path == "/audio-zip":
+            return self._post_audio_zip()
+        if self.path == "/llm-intent-check":
+            return self._post_llm_intent()
+        self._send(404, b"not found", "text/plain")
+
+    def _post_audio_zip(self):
         try:
             body = self._parse_post_body()
             zip_filename = body.get("zip_filename", "agora-export.zip")
@@ -133,8 +332,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._stream_zip(zip_filename, groups, total_files)
         except Exception:
             traceback.print_exc()
-            # Try to send a clean error, but if we already started streaming we
-            # just close the connection and let the client surface the failure.
+            try:
+                self._send(500, traceback.format_exc().encode(), "text/plain")
+            except Exception:
+                pass
+
+    def _post_llm_intent(self):
+        """Run the intent-judgement LLM over a list of calls. Returns ALL results
+        in one JSON response (no streaming for now — 8 parallel workers keep wall
+        time under a minute for typical batches of 20-200 intent calls)."""
+        try:
+            body = self._parse_post_body()
+            calls = body.get("calls", [])
+            if not LLM_API_KEY:
+                self._send(503, json.dumps({
+                    "error": "LLM API key missing. Set DASHSCOPE_API_KEY in "
+                             "~/.config/agora-outbound-call-analysis/env and restart the server.",
+                }, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                return
+            if not calls:
+                self._send(400, b'{"error":"empty calls"}', "application/json")
+                return
+
+            def judge(c):
+                r = _call_llm(c.get("transcript", ""), c.get("structured"))
+                return {"call_id": c.get("call_id", ""), **r}
+
+            t0 = time.time()
+            results = []
+            with ThreadPoolExecutor(max_workers=LLM_WORKERS) as ex:
+                futures = [ex.submit(judge, c) for c in calls]
+                for fut in as_completed(futures):
+                    results.append(fut.result())
+            elapsed = time.time() - t0
+            print(f"[llm-intent] {len(results)} calls in {elapsed:.1f}s "
+                  f"(model={LLM_MODEL})", flush=True)
+
+            payload = json.dumps({
+                "model": LLM_MODEL,
+                "elapsed_s": round(elapsed, 1),
+                "results": results,
+            }, ensure_ascii=False).encode("utf-8")
+            self._send(200, payload, "application/json; charset=utf-8")
+        except Exception:
+            traceback.print_exc()
             try:
                 self._send(500, traceback.format_exc().encode(), "text/plain")
             except Exception:
@@ -234,7 +475,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return
 
 
-def make_server(handler_cls, preferred: int) -> tuple[socketserver.TCPServer, int]:
+def make_server(handler_cls, preferred: int, host: str) -> tuple[socketserver.TCPServer, int]:
     """Try preferred port first; on any failure, let the OS assign one (port=0).
 
     Binding the actual HTTPServer here (not a probe socket) eliminates TOCTOU
@@ -246,17 +487,51 @@ def make_server(handler_cls, preferred: int) -> tuple[socketserver.TCPServer, in
 
     for candidate in [preferred, 0]:  # 0 = OS-assigned
         try:
-            httpd = ReusableTCPServer(("127.0.0.1", candidate), handler_cls)
+            httpd = ReusableTCPServer((host, candidate), handler_cls)
             return httpd, httpd.server_address[1]
         except OSError:
             continue
-    raise RuntimeError("Could not bind to any local port")
+    raise RuntimeError(f"Could not bind to {host} on any port")
+
+
+def list_lan_ips() -> list[str]:
+    """All non-loopback IPv4 addresses on this host. Multiple interfaces are
+    common (Wi-Fi + Ethernet + VPN + Docker bridge), and the "right" one for
+    coworkers depends on which network they're on — so we list them all and
+    let the user pick."""
+    ips: list[str] = []
+    # Method 1: socket.connect trick — gets the IP of the default-route interface
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and ip not in ips:
+            ips.append(ip)
+    except Exception:  # noqa: BLE001
+        pass
+    # Method 2: socket.getaddrinfo on hostname — usually catches LAN aliases
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:  # noqa: BLE001
+        pass
+    return ips
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Serve Agora dashboard locally with audio-zip proxy")
     p.add_argument("input", help="CSV or XLSX path")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument(
+        "--host", default="127.0.0.1",
+        help='Bind address. Default 127.0.0.1 (loopback only). '
+             'Use "0.0.0.0" to expose on the LAN so coworkers can open the '
+             'dashboard from their machines. macOS will pop a firewall '
+             'permission dialog the first time.',
+    )
     p.add_argument("--no-open", action="store_true", help="Don't auto-open the browser")
     args = p.parse_args()
 
@@ -270,16 +545,30 @@ def main() -> int:
     global HTML_BYTES
     HTML_BYTES = html.encode("utf-8")
 
-    httpd, port = make_server(Handler, args.port)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"Agora dashboard → {url}")
+    httpd, port = make_server(Handler, args.port, args.host)
+    local_url = f"http://127.0.0.1:{port}/"
+    print(f"Agora dashboard → {local_url}")
     if port != args.port:
         print(f"  (requested port {args.port} was busy; using OS-assigned {port})")
+    # When bound to all interfaces, list every non-loopback IPv4 so the user can
+    # pick the right one for their coworkers (Wi-Fi vs VPN vs Docker bridge).
+    if args.host in ("0.0.0.0", "::"):
+        ips = list_lan_ips()
+        if ips:
+            print(f"  LAN access:  (挑一个发给同事，VPN / 公司 Wi-Fi 用不同 IP)")
+            for ip in ips:
+                print(f"    http://{ip}:{port}/")
+        else:
+            print("  (无法列出 LAN IP；用 ifconfig 自己查)")
     print(f"  source: {inp.name}  (rows: {len(df)})")
     print("  Ctrl+C to stop")
 
+    # Kick off the LLM intent-truth job in background so by the time the user
+    # actually clicks the LLM button results are usually already done.
+    kickoff_intent_job(enriched)
+
     if not args.no_open:
-        threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.4, lambda: webbrowser.open(local_url)).start()
 
     try:
         httpd.serve_forever()

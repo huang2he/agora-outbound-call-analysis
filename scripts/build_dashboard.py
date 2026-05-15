@@ -90,33 +90,56 @@ def max_turn_id(transcript: list[dict]) -> int:
     return max(ids) if ids else 0
 
 
-def is_full_conversion(structured: dict | None) -> bool:
+# Conversion slot model (locked with user):
+# 4 slots — 车型 / 时间 / 城市 / 姓名. "车型" is satisfied iff 购车型号 is filled
+# (品牌 alone does NOT count; 型号 alone or both = OK). Intent (购车意向) is NOT a
+# conversion slot — it's a separate funnel branch.
+CONVERSION_SLOT_NAMES = ["车型", "时间", "城市", "姓名"]
+CONVERSION_SLOT_FIELDS = {
+    "车型": "购车型号",
+    "时间": "购车时间",
+    "城市": "购车城市",
+    "姓名": "购车姓名",
+}
+FULL_CONVERSION_MIN = 3  # ≥ 3 of 4 slots filled → counts as 完整转换
+
+
+def _val_filled(v) -> bool:
+    return v is not None and str(v).strip() != ""
+
+
+def filled_slots(structured: dict | None) -> list[str]:
+    """Return the names of the conversion slots that are filled in this row."""
     if not structured:
-        return False
-    return all(v is not None and v != "" for v in structured.values())
+        return []
+    return [name for name in CONVERSION_SLOT_NAMES
+            if _val_filled(structured.get(CONVERSION_SLOT_FIELDS[name]))]
+
+
+def is_full_conversion(structured: dict | None) -> bool:
+    """≥ 3 of the 4 conversion slots filled."""
+    return len(filled_slots(structured)) >= FULL_CONVERSION_MIN
+
+
+def is_full_with_model(structured: dict | None) -> bool:
+    """完整转换 (≥3 槽位) 且 车型槽 (购车型号) 已填。子集，比纯字段数更刚性 —
+    没有车型的"完整转换"对销售线索基本没用。"""
+    slots = filled_slots(structured)
+    return len(slots) >= FULL_CONVERSION_MIN and "车型" in slots
 
 
 def is_intent(structured: dict | None) -> bool:
+    """购车意向 字段 == "是"。注意：字段也会被填 "否" (客户明确拒绝)，所以仅看
+    "非 null" 会把拒绝的客户也算成意向。漏斗"意向客户"只算明确说要买的。"""
     if not structured:
         return False
     return str(structured.get("购车意向", "")).strip() == "是"
 
 
-# Fields treated as "intent flags" rather than "collected slots". When counting how
-# many data points the agent collected we exclude these so the count reflects only
-# real slot-filling (品牌 / 城市 / 时间 etc.), not whether the customer said yes.
-INTENT_FLAG_FIELDS = {"购车意向"}
-
-
 def collected_field_count(structured: dict | None) -> int:
-    """Number of non-null / non-empty slots in the Structured Output,
-    excluding intent-flag fields like 购车意向."""
-    if not structured:
-        return 0
-    return sum(
-        1 for k, v in structured.items()
-        if k not in INTENT_FLAG_FIELDS and v is not None and v != ""
-    )
+    """How many of the 4 conversion slots are filled (0..4). Used by the
+    "完整转换分布" bar chart. 购车意向 is intentionally NOT a slot here."""
+    return len(filled_slots(structured))
 
 
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
@@ -127,15 +150,19 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     df["_max_turn_id"] = df["_transcript"].apply(max_turn_id)
     df["_answered"] = df["Duration (seconds)"] > 0
     df["_human"] = df["Hangup Reason"].isin(HUMAN_HANGUP)
-    df["_full"] = df["_structured"].apply(is_full_conversion)
+    df["_filled_slots"] = df["_structured"].apply(filled_slots)
+    df["_field_count"] = df["_filled_slots"].apply(len)
+    df["_full"] = df["_field_count"] >= FULL_CONVERSION_MIN
+    df["_full_with_model"] = df.apply(
+        lambda r: r["_full"] and "车型" in r["_filled_slots"], axis=1
+    )
     df["_intent"] = df["_structured"].apply(is_intent)
-    df["_field_count"] = df["_structured"].apply(collected_field_count)
     return df
 
 
 # ---------- metric extraction ----------
 
-FUNNEL_LABELS = ["拨打总数", "接听", "真人接听", "完整转换", "意向客户"]
+FUNNEL_LABELS = ["拨打总数", "接听", "真人接听", "完整转换", "带车型完整转换", "意向客户"]
 
 
 def funnel_counts(df: pd.DataFrame) -> list[int]:
@@ -144,6 +171,7 @@ def funnel_counts(df: pd.DataFrame) -> list[int]:
         int(df["_answered"].sum()),
         int(df["_human"].sum()),
         int(df["_full"].sum()),
+        int(df["_full_with_model"].sum()),
         int(df["_intent"].sum()),
     ]
 
@@ -213,21 +241,39 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
         first_sentence["Duration (seconds)"], first_dur_x_max
     )
 
-    # 收集字段数量分布：真人接听里，Structured Output 排除"购车意向"后的非空字段数。
+    # 完整转换槽位分布：真人接听里，4 槽位中填了几个 (0..4)。
     # X 轴范围用全局 field_x_max 锁定，方便跨 Agent 横向对照。
     field_counts = [int((human["_field_count"] == i).sum()) for i in range(field_x_max + 1)]
+
+    # 完整转换下钻：在 ≥3 槽位的子集里，4/4 vs 仅 3/4 的占比，以及 3/4 通话缺的是哪个槽位。
+    full_calls = human[human["_full"]]
+    exactly_4 = int((full_calls["_field_count"] == 4).sum())
+    exactly_3 = int((full_calls["_field_count"] == 3).sum())
+    missing_3of4: dict[str, int] = {name: 0 for name in CONVERSION_SLOT_NAMES}
+    for slots in full_calls[full_calls["_field_count"] == 3]["_filled_slots"]:
+        for name in CONVERSION_SLOT_NAMES:
+            if name not in slots:
+                missing_3of4[name] += 1
+    full_conv_drill = {
+        "total_human": len(human),
+        "full_count": len(full_calls),
+        "exactly_4": exactly_4,
+        "exactly_3": exactly_3,
+        "missing_3of4": missing_3of4,
+    }
 
     totals = funnel_counts(df_slice)
 
     return {
         "n": len(df_slice),
         "totals": {"labels": FUNNEL_LABELS, "values": totals},
-        # Funnel denominators for the hero KPI percentages: 总 / 接听 / 真人接听.
-        # JS divides each numerator by these to produce the three percentage rows.
+        # Funnel denominators for the hero KPI percentages: 总 / 接听 / 真人接听 / 完整转换.
+        # JS divides each numerator by the relevant denominators per card.
         "denominators": {
             "total": totals[0],
             "answered": totals[1],
             "human": totals[2],
+            "full": totals[3],
         },
         "turn_dist": {
             "x": list(range(1, turn_x_max + 1)),
@@ -252,6 +298,7 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
             "data": field_counts,
             "n": len(human),
         },
+        "full_conversion_drill": full_conv_drill,
         "hangup_breakdown": hangup_breakdown(df_slice),
     }
 
@@ -291,7 +338,8 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
     turn_x_max = max(int(human_all["_max_turn_id"].max()) if len(human_all) else 1, 1)
     dur_x_max = max(int(answered_all["Duration (seconds)"].max()) if len(answered_all) else 30, 30)
     first_dur_x_max = max(int(first_sent_all["Duration (seconds)"].max()) if len(first_sent_all) else 10, 10)
-    field_x_max = int(human_all["_field_count"].max()) if len(human_all) else 0
+    # X axis is always 0..4 since we now track 4 conversion slots.
+    field_x_max = 4
 
     agents = sorted(df_enriched["Agent Name"].unique())
     datasets = {ALL_KEY: slice_data(df_enriched, turn_x_max, dur_x_max, first_dur_x_max, field_x_max)}
@@ -313,6 +361,10 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         rec["_max_turn"] = int(r["_max_turn_id"])
         rec["_assistant_turns"] = int(r["_assistant_turns"])
         rec["_field_count"] = int(r["_field_count"])
+        rec["_full_with_model"] = bool(r["_full_with_model"])
+        # Carry the parsed Structured Output along so the browser can ship it
+        # straight to the LLM endpoint for the intent-truth check.
+        rec["_structured"] = r["_structured"]
         rows.append(rec)
 
     return {
@@ -370,7 +422,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .section-note {{ font-size: 11px; color: var(--muted); margin: 0 0 8px; line-height: 1.5; }}
   .section-note b {{ color: var(--text); font-weight: 600; }}
 
-  .stats {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }}
+  .stats {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }}
   @media (max-width: 900px) {{ .stats {{ grid-template-columns: repeat(2, 1fr); }} }}
 
   /* Hero+Funnel split: 5 KPI cards stacked on the left, funnel chart on the right */
@@ -396,8 +448,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .stat:nth-child(3)::after {{ background: #f59e0b; }}
   .stat:nth-child(4) {{ background: #ecfeff; border-color: #a5f3fc; }}
   .stat:nth-child(4)::after {{ background: #06b6d4; }}
-  .stat:nth-child(5) {{ background: #faf5ff; border-color: #d8b4fe; }}
-  .stat:nth-child(5)::after {{ background: #a855f7; }}
+  .stat:nth-child(5) {{ background: #f0fdfa; border-color: #99f6e4; }}
+  .stat:nth-child(5)::after {{ background: #14b8a6; }}
+  .stat:nth-child(6) {{ background: #faf5ff; border-color: #d8b4fe; }}
+  .stat:nth-child(6)::after {{ background: #a855f7; }}
   .stat .label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }}
   .stat .val {{ font-size: 26px; font-weight: 700; margin-top: 4px; color: var(--text); line-height: 1.1; }}
   .stat .pct {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
@@ -425,6 +479,69 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .defs code {{ background: var(--panel-2); padding: 1px 5px; border-radius: 3px; color: var(--text); }}
 
   .empty {{ color: var(--muted); padding: 20px; text-align: center; font-size: 13px; }}
+
+  /* "1 · 漏斗" + LLM trigger button on the same line */
+  .section-row {{ display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; flex-wrap: wrap; }}
+  .section-row h2 {{ margin: 0; }}
+  .llm-btn {{ background: linear-gradient(135deg, #6366f1, #a855f7); color: white; border: none;
+              padding: 5px 12px; border-radius: 6px; font: inherit; font-size: 11px; font-weight: 600;
+              cursor: pointer; box-shadow: 0 1px 3px rgba(99,102,241,0.3); display: inline-flex;
+              align-items: center; gap: 6px; }}
+  .llm-btn:hover {{ filter: brightness(1.08); }}
+  .llm-btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+  .llm-btn .dot {{ width: 6px; height: 6px; border-radius: 50%; background: white; }}
+
+  /* Small inline tab toggle (for views like 首句挂断 全部 vs 短挂断) */
+  .view-toggle {{ display: inline-flex; gap: 0; margin-left: 8px; }}
+  .view-toggle button {{ background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+                          font: inherit; font-size: 10px; padding: 3px 9px; cursor: pointer; }}
+  .view-toggle button:first-child {{ border-radius: 4px 0 0 4px; border-right: none; }}
+  .view-toggle button:last-child {{ border-radius: 0 4px 4px 0; }}
+  .view-toggle button.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
+  .view-toggle button:hover:not(.active) {{ color: var(--text); }}
+
+  /* LLM result summary chips inside the LLM modal */
+  .llm-summary {{ display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }}
+  .llm-summary .chip {{ flex: 1; min-width: 90px; background: var(--panel-2); border-radius: 6px;
+                         padding: 10px 12px; text-align: center; border: 1px solid var(--border); }}
+  .llm-summary .chip .ct {{ font-size: 22px; font-weight: 700; line-height: 1.1; }}
+  .llm-summary .chip .lb {{ font-size: 11px; color: var(--muted); margin-top: 3px; }}
+  .llm-summary .chip.real {{ background: #ecfdf5; border-color: #a7f3d0; }}
+  .llm-summary .chip.real .ct {{ color: #047857; }}
+  .llm-summary .chip.fake {{ background: #fef2f2; border-color: #fecaca; }}
+  .llm-summary .chip.fake .ct {{ color: #b91c1c; }}
+  .llm-summary .chip.mid  {{ background: #fffbeb; border-color: #fde68a; }}
+  .llm-summary .chip.mid .ct  {{ color: #b45309; }}
+  .llm-summary .chip.err  {{ background: #fef2f2; border-color: #fca5a5; }}
+  .llm-summary .chip.err .ct  {{ color: #b91c1c; }}
+  /* 完整转换下钻面板 */
+  .drill {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }}
+  @media (max-width: 900px) {{ .drill {{ grid-template-columns: 1fr; }} }}
+  .drill-head {{ display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }}
+  .drill-head .num {{ font-size: 24px; font-weight: 700; color: var(--text); }}
+  .drill-head .lbl {{ font-size: 12px; color: var(--muted); }}
+  .drill-split {{ display: flex; gap: 8px; }}
+  .drill-split .seg {{ flex: 1; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }}
+  .drill-split .seg.full {{ background: #ecfdf5; border-color: #a7f3d0; }}
+  .drill-split .seg.full .num {{ color: #047857; }}
+  .drill-split .seg.three {{ background: #fffbeb; border-color: #fde68a; }}
+  .drill-split .seg.three .num {{ color: #b45309; }}
+  .drill-split .seg .num {{ font-size: 22px; font-weight: 700; line-height: 1.1; }}
+  .drill-split .seg .pct {{ font-size: 11px; color: var(--muted); }}
+  .drill-split .seg .lbl {{ font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }}
+  .drill-miss h4 {{ margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--text); }}
+  .drill-miss .row {{ display: grid; grid-template-columns: 60px 1fr 56px; gap: 8px; align-items: center; font-size: 12px; margin: 4px 0; }}
+  .drill-miss .row .label {{ color: var(--muted); }}
+  .drill-miss .row .bar {{ height: 10px; background: var(--panel-2); border-radius: 3px; overflow: hidden; position: relative; }}
+  .drill-miss .row .bar > div {{ height: 100%; background: linear-gradient(90deg, #f43f5e, #f59e0b); }}
+  .drill-miss .row .val {{ text-align: right; color: var(--text); font-variant-numeric: tabular-nums; font-size: 11px; }}
+
+  .modal .modal-actions {{ display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }}
+  .modal button.primary {{ background: var(--accent); color: white; border: 1px solid var(--accent);
+                           padding: 7px 16px; border-radius: 6px; font: inherit; font-size: 12px;
+                           cursor: pointer; }}
+  .modal button.primary:hover {{ filter: brightness(1.05); }}
+  .modal button.primary:disabled {{ opacity: 0.5; cursor: not-allowed; }}
 
   /* Percentages render on a single horizontal line, wrapping only when the card
      is too narrow to fit all three (e.g. mobile). */
@@ -488,7 +605,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="hero-funnel">
   <div class="stats" id="hero-stats"></div>
   <div class="funnel-wrap">
-    <h2>1 · 漏斗 <span class="export-hint">点击层级导出</span></h2>
+    <div class="section-row" style="margin-top:0;">
+      <h2>1 · 漏斗 <span class="export-hint">点击层级导出</span></h2>
+      <button id="btn-llm-intent" class="llm-btn" title="用大模型重新判定意向客户的真假">
+        <span class="dot"></span>LLM 意向真伪分析
+      </button>
+    </div>
     <div class="card"><div id="chart-funnel" class="chart tall"></div></div>
   </div>
 </div>
@@ -522,14 +644,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>4 · 收集字段数量分布 (真人接听内 · 去除"购车意向") <span class="export-hint">点击柱子导出</span></h2>
-<p class="section-note">备注：从 <b>Structured Output</b> JSON 里数非 null/非空的字段数，排除 <b>购车意向</b>（那是意向标签，不是收集到的数据）。X 轴是该通采集到的字段数，越靠右说明 agent 把客户信息收得越全。</p>
+<h2>4 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<p class="section-note">备注：4 个槽位 — <b>车型 (购车型号)</b> · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。注意"车型"槽：<b>只有品牌没有型号不算填齐</b>；有型号（不管有没有品牌）就算填齐。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
     <div class="turn-bar"><div id="chart-field-count" class="chart"></div></div>
     <div class="turn-donut"><div id="chart-field-count-donut" class="chart"></div></div>
   </div>
 </div>
+<div class="card" id="full-conv-drill" style="margin-top:8px;"></div>
 
 <h2>5 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
@@ -539,13 +662,49 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="early-hangup-table"></div>
   </div>
   <div class="card">
-    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">首句挂断 · Duration 分布</h3>
-    <p class="section-note" style="margin:0 0 12px;">看"AI 刚说完第一句就被掐掉"的通话有多短。<b>横轴=秒</b>，柱高=该秒数挂断的通话数，<b>百分比相对首句挂断总数</b>。</p>
+    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px; display:flex; align-items:center; flex-wrap:wrap;">
+      首句挂断 · Duration 分布
+      <span class="view-toggle" id="fs-view-toggle">
+        <button data-view="all" class="active">全部</button>
+        <button data-view="short">短挂断 (&lt;15秒)</button>
+      </span>
+      <span class="export-hint" style="margin-left:auto;">点柱导出</span>
+    </h3>
+    <p class="section-note" style="margin:0 0 12px;">"AI 刚说完第一句就被掐掉"的通话时长分布。"短挂断"视角聚焦 <b>&lt; 15 秒</b> 的，那些通常是开场白没说完就被切话；"全部"视角包括开场白说完后客户才挂的。</p>
     <div id="chart-first-sentence-dur" class="chart"></div>
   </div>
 </div>
 
 <div id="toast" class="toast"></div>
+
+<div id="llm-modal" class="modal-backdrop">
+  <div class="modal" style="min-width: 460px; max-width: 640px;">
+    <h3>LLM 意向真伪分析</h3>
+    <div class="sub" id="llm-sub"></div>
+    <div id="llm-stage-pre" style="display:none;">
+      <p style="font-size:12px; color:var(--muted); line-height:1.6;" id="llm-pre-text"></p>
+      <div class="modal-actions">
+        <button class="cancel" id="llm-cancel-pre">关闭</button>
+      </div>
+    </div>
+    <div id="llm-stage-running" style="display:none;">
+      <p style="font-size:12px; color:var(--muted); margin: 0 0 10px;">服务端 16 路并行调 LLM，每 5 秒自动刷新。可以关掉弹窗，结果不会丢。</p>
+      <div class="progress" style="display:block;">
+        <div id="llm-progress-text"></div>
+        <div class="bar"><div id="llm-progress-bar"></div></div>
+      </div>
+    </div>
+    <div id="llm-stage-done" style="display:none;">
+      <div class="llm-summary" id="llm-summary"></div>
+      <p style="font-size:11px; color:var(--muted); margin: 4px 0 8px;">每行点开可以看完整 reason + 证据；导出 Excel 含全部字段。</p>
+      <div id="llm-results-table" style="max-height:300px; overflow:auto;"></div>
+      <div class="modal-actions">
+        <button class="cancel" id="llm-close">关闭</button>
+        <button class="primary" id="llm-export">导出 Excel</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="export-modal" class="modal-backdrop">
   <div class="modal">
@@ -580,7 +739,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 const DATA = {data_json};
 
-const PALETTE = ['#2563eb', '#10b981', '#f59e0b', '#06b6d4', '#a855f7', '#f43f5e', '#0ea5e9'];
+const PALETTE = ['#2563eb', '#10b981', '#f59e0b', '#06b6d4', '#14b8a6', '#a855f7', '#f43f5e', '#0ea5e9'];
 const TEXT = '#0f172a';
 const MUTED = '#64748b';
 const BORDER = '#e2e8f0';
@@ -941,8 +1100,8 @@ function exportTurnTriple(turnId) {{
 // Single-group filters
 const FILTERS = {{
   funnel: (idx, scope) => {{
-    const fns = [r => true, r => r._answered, r => r._human, r => r._full, r => r._intent];
-    return [scope.filter(fns[idx]), `funnel-${{['all','answered','human','full','intent'][idx]}}`];
+    const fns = [r => true, r => r._answered, r => r._human, r => r._full, r => r._full_with_model, r => r._intent];
+    return [scope.filter(fns[idx]), `funnel-${{['all','answered','human','full','full-with-model','intent'][idx]}}`];
   }},
   duration: (sec, scope) => {{
     return [scope.filter(r => r._human && r._duration === sec), `duration-${{sec}}s`];
@@ -974,13 +1133,15 @@ function renderHero(totals, denominators) {{
     total:    {{ label: '占总',   value: denominators.total }},
     answered: {{ label: '占接听', value: denominators.answered }},
     human:    {{ label: '占真人', value: denominators.human }},
+    full:     {{ label: '占完整', value: denominators.full }},
   }};
   const SHOW = [
-    [],                                  // 拨打总数
-    ['total'],                           // 接听
-    ['total', 'answered'],               // 真人接听
-    ['total', 'answered', 'human'],      // 完整转换
-    ['total', 'answered', 'human'],      // 意向客户
+    [],                                          // 0 拨打总数
+    ['total'],                                   // 1 接听
+    ['total', 'answered'],                       // 2 真人接听
+    ['total', 'answered', 'human'],              // 3 完整转换
+    ['total', 'answered', 'human', 'full'],      // 4 带车型完整转换
+    ['total', 'answered', 'human'],              // 5 意向客户
   ];
   const html = totals.labels.map((label, i) => {{
     const v = totals.values[i];
@@ -1130,8 +1291,28 @@ function renderDuration(dd) {{
   }}, true);
 }}
 
-function renderFirstSentenceDur(fd) {{
-  if (!fd || !fd.n) {{
+// View mode for the 首句挂断 · Duration chart: 'all' or 'short' (<15s only).
+let firstSentenceView = 'all';
+
+function firstSentenceData(viewMode) {{
+  // Compute the histogram fresh from DATA.rows so the toggle (and any future
+  // filter) doesn't need a backend round-trip. Restricted to the current
+  // dropdown scope as usual.
+  const base = scopedRows().filter(r => r._human && r._assistant_turns === 1);
+  const rows = viewMode === 'short' ? base.filter(r => r._duration < 15) : base;
+  let maxSec = 0;
+  rows.forEach(r => {{ if (r._duration > maxSec) maxSec = r._duration; }});
+  // Always show at least 0..5s buckets so even an empty/short view looks like a chart.
+  if (viewMode === 'short') maxSec = Math.min(Math.max(maxSec, 5), 14);
+  else maxSec = Math.max(maxSec, 5);
+  const data = new Array(maxSec + 1).fill(0);
+  rows.forEach(r => {{ if (r._duration >= 0 && r._duration <= maxSec) data[r._duration]++; }});
+  return {{ x: data.map((_, i) => String(i)), data, n: rows.length, viewMode }};
+}}
+
+function renderFirstSentenceDur() {{
+  const fd = firstSentenceData(firstSentenceView);
+  if (!fd.n) {{
     charts['chart-first-sentence-dur'].clear();
     charts['chart-first-sentence-dur'].setOption({{
       title: {{ text: '无首句挂断数据', left: 'center', top: 'middle',
@@ -1140,11 +1321,11 @@ function renderFirstSentenceDur(fd) {{
     return;
   }}
   const total = fd.n;
-  // Truncate trailing zero tail for readability — find the last second with data.
   let lastIdx = fd.data.length - 1;
   while (lastIdx > 0 && fd.data[lastIdx] === 0) lastIdx--;
   const x = fd.x.slice(0, lastIdx + 1);
   const data = fd.data.slice(0, lastIdx + 1);
+  const viewLabel = fd.viewMode === 'short' ? '短挂断' : '首句挂断';
 
   charts['chart-first-sentence-dur'].setOption({{
     color: ['#f43f5e'],
@@ -1153,16 +1334,16 @@ function renderFirstSentenceDur(fd) {{
       formatter: params => {{
         const p = params[0];
         const pct = (p.value / total * 100).toFixed(1);
-        return `<b>${{p.name}} 秒</b><br>${{p.value}} 通 · ${{pct}}% / 首句挂断 (n=${{total}})`;
+        return `<b>${{p.name}} 秒</b><br>${{p.value}} 通 · ${{pct}}% / ${{viewLabel}} (n=${{total}})`;
       }},
     }}),
-    grid: {{ left: 48, right: 16, top: 28, bottom: 36, containLabel: true }},
-    xAxis: Object.assign({{ type: 'category', name: '秒', data: x,
+    grid: {{ left: 4, right: 8, top: 22, bottom: 4, containLabel: true }},
+    xAxis: Object.assign({{ type: 'category', name: '秒', data: x, nameGap: 18,
                             axisLabel: {{ color: MUTED, fontSize: 10, interval: 0,
                                           rotate: x.length > 15 ? 35 : 0 }} }}, baseAxis),
-    yAxis: Object.assign({{ type: 'value', name: `通话数 (n=${{total}})` }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: `n=${{total}}`, nameGap: 8 }}, baseAxis),
     series: [{{
-      name: '首句挂断', type: 'bar', data,
+      name: viewLabel, type: 'bar', data,
       itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
       label: {{
         show: true, position: 'top', color: MUTED, fontSize: 10,
@@ -1257,6 +1438,53 @@ function renderFieldCountDist(fc) {{
   }}, true);
 }}
 
+function renderFullConversionDrill(drill) {{
+  const el = document.getElementById('full-conv-drill');
+  if (!drill || !drill.full_count) {{
+    el.innerHTML = '<div class="empty">当前 scope 没有"完整转换 (≥3 槽位)"通话</div>';
+    return;
+  }}
+  const fullPct = (drill.full_count / Math.max(1, drill.total_human) * 100).toFixed(1);
+  const sharePctOf = (n) => drill.full_count ? (n / drill.full_count * 100).toFixed(0) : 0;
+  // missing breakdown rows — only show slots that actually have missing counts
+  const missingTotal = Object.values(drill.missing_3of4).reduce((s, v) => s + v, 0);
+  const order = ['车型', '时间', '城市', '姓名'];
+  const rows = order.map(slot => {{
+    const n = drill.missing_3of4[slot] || 0;
+    const pct = missingTotal ? (n / missingTotal * 100) : 0;
+    return `<div class="row">
+      <span class="label">缺 ${{slot}}</span>
+      <div class="bar"><div style="width:${{Math.min(pct, 100)}}%;"></div></div>
+      <span class="val">${{n}} · ${{pct.toFixed(0)}}%</span>
+    </div>`;
+  }}).join('');
+
+  el.innerHTML = `
+    <div class="drill-head">
+      <span class="num">${{drill.full_count}}</span>
+      <span class="lbl">完整转换 通话 · ${{fullPct}}% / 真人接听 (${{drill.total_human}})</span>
+    </div>
+    <div class="drill">
+      <div class="drill-split">
+        <div class="seg full">
+          <div class="lbl">4 / 4 全齐</div>
+          <div class="num">${{drill.exactly_4}}</div>
+          <div class="pct">${{sharePctOf(drill.exactly_4)}}% / 完整转换</div>
+        </div>
+        <div class="seg three">
+          <div class="lbl">仅 3 / 4 满足</div>
+          <div class="num">${{drill.exactly_3}}</div>
+          <div class="pct">${{sharePctOf(drill.exactly_3)}}% / 完整转换</div>
+        </div>
+      </div>
+      <div class="drill-miss">
+        <h4>仅 3/4 的通话里 · 缺哪个槽位</h4>
+        ${{missingTotal ? rows : '<div style="color:var(--muted); font-size:12px;">（无仅 3/4 满足通话）</div>'}}
+      </div>
+    </div>
+  `;
+}}
+
 function render(key) {{
   const d = DATA.datasets[key];
   renderHero(d.totals, d.denominators);
@@ -1264,8 +1492,9 @@ function render(key) {{
   renderTurnTriad(d.turn_dist);
   renderDuration(d.duration_dist);
   renderFieldCountDist(d.field_count_dist);
+  renderFullConversionDrill(d.full_conversion_drill);
   renderEarlyHangupTable(d.early_hangup);
-  renderFirstSentenceDur(d.first_sentence_dur);
+  renderFirstSentenceDur();
 }}
 
 const sel = document.getElementById('agent-select');
@@ -1299,6 +1528,30 @@ charts['chart-field-count'].on('click', p => {{
   exportRows(subset, `fields-${{n}}`);
 }});
 
+// 首句挂断 Duration bar: click → export the calls hung up at exactly that
+// second. Respects the current view (all vs short < 15s).
+charts['chart-first-sentence-dur'].on('click', p => {{
+  if (p.componentType !== 'series') return;
+  const sec = parseInt(p.name, 10);
+  const base = scopedRows().filter(r => r._human && r._assistant_turns === 1 && r._duration === sec);
+  const subset = firstSentenceView === 'short' ? base.filter(r => r._duration < 15) : base;
+  const tag = firstSentenceView === 'short' ? 'short' : 'all';
+  exportRows(subset, `first-sentence-${{sec}}s-${{tag}}`);
+}});
+
+// 首句挂断 视角 toggle
+document.getElementById('fs-view-toggle').addEventListener('click', e => {{
+  const btn = e.target.closest('button[data-view]');
+  if (!btn) return;
+  const view = btn.getAttribute('data-view');
+  if (view === firstSentenceView) return;
+  firstSentenceView = view;
+  document.querySelectorAll('#fs-view-toggle button').forEach(b => {{
+    b.classList.toggle('active', b.getAttribute('data-view') === view);
+  }});
+  renderFirstSentenceDur();
+}});
+
 charts['chart-duration'].on('click', p => {{
   if (p.componentType !== 'series') return;
   const sec = parseInt(p.name, 10);
@@ -1309,6 +1562,176 @@ charts['chart-duration'].on('click', p => {{
 window.addEventListener('resize', () => {{
   Object.values(charts).forEach(c => c.resize());
 }});
+
+// ──────────────────────────────────────────────────────────────────────────
+// LLM 意向真伪分析
+// ──────────────────────────────────────────────────────────────────────────
+
+const llmModal = document.getElementById('llm-modal');
+const llmSubEl = document.getElementById('llm-sub');
+const llmStagePre = document.getElementById('llm-stage-pre');
+const llmStageRun = document.getElementById('llm-stage-running');
+const llmStageDone = document.getElementById('llm-stage-done');
+const llmProgressText = document.getElementById('llm-progress-text');
+const llmProgressBar = document.getElementById('llm-progress-bar');
+const llmSummaryEl = document.getElementById('llm-summary');
+const llmResultsTable = document.getElementById('llm-results-table');
+
+// Server-side LLM job is auto-kicked off at dashboard start. The modal here is
+// just a viewer that polls /llm-intent-status every 5s while open.
+let llmResults = [];
+let llmPollTimer = null;
+let llmLastModel = '';
+
+function openLLMIntentDialog() {{
+  llmModal.classList.add('show');
+  llmStagePre.style.display = 'none';
+  llmStageRun.style.display = 'block';
+  llmStageDone.style.display = 'none';
+  llmProgressBar.style.width = '0%';
+  llmProgressText.textContent = '加载中…';
+  llmSubEl.innerHTML = '查询服务端状态…';
+  pollLLMStatus();
+  if (!llmPollTimer) {{
+    llmPollTimer = setInterval(pollLLMStatus, 5000);
+  }}
+}}
+
+function closeLLMModal() {{
+  llmModal.classList.remove('show');
+  if (llmPollTimer) {{ clearInterval(llmPollTimer); llmPollTimer = null; }}
+}}
+
+async function pollLLMStatus() {{
+  try {{
+    const resp = await fetch('/llm-intent-status');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderLLMStatus(data);
+    if (data.status === 'done' || data.status === 'error' || data.status === 'skipped') {{
+      if (llmPollTimer) {{ clearInterval(llmPollTimer); llmPollTimer = null; }}
+    }}
+  }} catch (e) {{
+    // Transient errors are fine — next tick will retry.
+  }}
+}}
+
+function renderLLMStatus(data) {{
+  llmLastModel = data.model || llmLastModel;
+  const scope = buildScopeName();
+  const inScopeIds = new Set(scopedRows().filter(r => r._intent).map(r => r['Call ID']));
+  const scopedResults = (data.results || []).filter(r => inScopeIds.has(r.call_id));
+  llmResults = scopedResults;
+
+  llmSubEl.innerHTML = `模型 <code style="background:var(--panel-2);padding:1px 5px;border-radius:3px;">${{data.model || '-'}}</code> · scope <b>${{scope}}</b> · 当前 scope 意向客户 <b>${{inScopeIds.size}}</b>`;
+
+  if (data.status === 'skipped') {{
+    llmStagePre.style.display = 'block';
+    llmStageRun.style.display = 'none';
+    llmStageDone.style.display = 'none';
+    document.getElementById('llm-pre-text').innerHTML = `<span style="color:#b45309;">LLM 自动分析未启动：${{data.error || '未知原因'}}</span>`;
+    return;
+  }}
+
+  if (data.status === 'error') {{
+    llmStagePre.style.display = 'block';
+    llmStageRun.style.display = 'none';
+    llmStageDone.style.display = 'none';
+    document.getElementById('llm-pre-text').innerHTML = `<span style="color:#b91c1c;">分析出错: ${{data.error || 'unknown'}}</span>`;
+    return;
+  }}
+
+  if (data.status === 'running' || data.status === 'idle') {{
+    llmStagePre.style.display = 'none';
+    llmStageRun.style.display = 'block';
+    llmStageDone.style.display = 'none';
+    const total = data.total || 1;
+    const pct = (data.done / total * 100).toFixed(1);
+    llmProgressBar.style.width = pct + '%';
+    llmProgressText.textContent = `全局进度: ${{data.done}} / ${{data.total}}  · 已 ${{data.elapsed_s}}s`;
+    // Also surface partial results table even mid-flight, so user sees real-time output.
+    showLLMResults(true);
+    return;
+  }}
+
+  // done
+  llmStageRun.style.display = 'none';
+  showLLMResults(false);
+}}
+
+function showLLMResults(midflight) {{
+  if (!midflight) llmStageRun.style.display = 'none';
+  llmStageDone.style.display = 'block';
+  // Summary chips
+  const counts = {{ '真意向': 0, '假意向': 0, '模糊': 0, '失败': 0 }};
+  for (const r of llmResults) {{
+    if (r.error) counts['失败']++;
+    else if (counts[r.verdict] !== undefined) counts[r.verdict]++;
+    else counts['模糊']++;
+  }}
+  const total = llmResults.length || 1;
+  llmSummaryEl.innerHTML = `
+    <div class="chip real"><div class="ct">${{counts['真意向']}}</div><div class="lb">真意向 · ${{(counts['真意向']/total*100).toFixed(0)}}%</div></div>
+    <div class="chip fake"><div class="ct">${{counts['假意向']}}</div><div class="lb">假意向 · ${{(counts['假意向']/total*100).toFixed(0)}}%</div></div>
+    <div class="chip mid"><div class="ct">${{counts['模糊']}}</div><div class="lb">模糊 · ${{(counts['模糊']/total*100).toFixed(0)}}%</div></div>
+    ${{counts['失败'] ? `<div class="chip err"><div class="ct">${{counts['失败']}}</div><div class="lb">调用失败</div></div>` : ''}}
+  `;
+  // Results table
+  llmResultsTable.innerHTML = `<table style="font-size:11px;"><thead><tr>
+    <th>Call ID</th><th>判定</th><th>依据</th><th>证据</th></tr></thead><tbody>${{
+    llmResults.map(r => {{
+      const v = r.error ? '⚠ 失败' : (r.verdict || '?');
+      const color = r.error ? '#b91c1c' :
+                    r.verdict === '真意向' ? '#047857' :
+                    r.verdict === '假意向' ? '#b91c1c' : '#b45309';
+      return `<tr>
+        <td><code style="font-size:10px; background:var(--panel-2); padding:1px 4px; border-radius:3px;">${{(r.call_id || '').slice(-8)}}</code></td>
+        <td style="color:${{color}}; font-weight:600;">${{v}}</td>
+        <td>${{r.error || r.reason || ''}}</td>
+        <td style="color:var(--muted);">${{r.evidence || ''}}</td>
+      </tr>`;
+    }}).join('')
+  }}</tbody></table>`;
+}}
+
+function exportLLMResults() {{
+  // Join results back to source rows so the xlsx has the full pic.
+  const byId = new Map(scopedRows().filter(r => r._intent).map(r => [r['Call ID'], r]));
+  const cols = ['Call ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
+                'LLM Verdict', 'LLM Reason', 'LLM Evidence', 'LLM Error',
+                'Is Full Conversion', 'Assistant turns', 'Transcript', 'Audio URL'];
+  const aoa = [cols];
+  for (const r of llmResults) {{
+    const src = byId.get(r.call_id) || {{}};
+    aoa.push([
+      r.call_id,
+      src['Agent Name'] || '',
+      src['Duration (s)'] ?? '',
+      src['Hangup Reason'] || '',
+      r.verdict || '',
+      r.reason || '',
+      r.evidence || '',
+      r.error || '',
+      src['Is Full Conversion'] ?? '',
+      src['Assistant turns'] ?? '',
+      src['Transcript'] || '',
+      src['Audio URL'] || '',
+    ]);
+  }}
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [16, 28, 8, 16, 8, 36, 36, 24, 8, 10, 60, 28].map(w => ({{ wch: w }}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'llm-intent');
+  const fname = safeFilename(`agora-llm-intent-${{buildScopeName()}}-n${{llmResults.length}}`) + '.xlsx';
+  XLSX.writeFile(wb, fname);
+  showToast(`导出 ${{llmResults.length}} 条 → ${{fname}}`);
+}}
+
+document.getElementById('btn-llm-intent').addEventListener('click', openLLMIntentDialog);
+document.getElementById('llm-cancel-pre').addEventListener('click', closeLLMModal);
+document.getElementById('llm-close').addEventListener('click', closeLLMModal);
+document.getElementById('llm-export').addEventListener('click', exportLLMResults);
+llmModal.addEventListener('click', e => {{ if (e.target === llmModal) closeLLMModal(); }});
 
 // ECharts locks the canvas size at init() time. Flex/grid layouts (like the
 // hero+funnel split where the funnel card stretches to match the left KPI
