@@ -102,6 +102,23 @@ def is_intent(structured: dict | None) -> bool:
     return str(structured.get("购车意向", "")).strip() == "是"
 
 
+# Fields treated as "intent flags" rather than "collected slots". When counting how
+# many data points the agent collected we exclude these so the count reflects only
+# real slot-filling (品牌 / 城市 / 时间 etc.), not whether the customer said yes.
+INTENT_FLAG_FIELDS = {"购车意向"}
+
+
+def collected_field_count(structured: dict | None) -> int:
+    """Number of non-null / non-empty slots in the Structured Output,
+    excluding intent-flag fields like 购车意向."""
+    if not structured:
+        return 0
+    return sum(
+        1 for k, v in structured.items()
+        if k not in INTENT_FLAG_FIELDS and v is not None and v != ""
+    )
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["_transcript"] = df["Transcript"].apply(parse_transcript)
@@ -112,6 +129,7 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     df["_human"] = df["Hangup Reason"].isin(HUMAN_HANGUP)
     df["_full"] = df["_structured"].apply(is_full_conversion)
     df["_intent"] = df["_structured"].apply(is_intent)
+    df["_field_count"] = df["_structured"].apply(collected_field_count)
     return df
 
 
@@ -176,7 +194,7 @@ def hangup_breakdown(df: pd.DataFrame) -> list[dict]:
 
 
 def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
-               first_dur_x_max: int) -> dict:
+               first_dur_x_max: int, field_x_max: int) -> dict:
     """All charts for one slice (全部 or single agent).
 
     Turn distribution is 真人接听内, so 完整转换/意向 series here are restricted to
@@ -194,6 +212,10 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
     first_dur_labels, first_dur_counts = duration_histogram(
         first_sentence["Duration (seconds)"], first_dur_x_max
     )
+
+    # 收集字段数量分布：真人接听里，Structured Output 排除"购车意向"后的非空字段数。
+    # X 轴范围用全局 field_x_max 锁定，方便跨 Agent 横向对照。
+    field_counts = [int((human["_field_count"] == i).sum()) for i in range(field_x_max + 1)]
 
     totals = funnel_counts(df_slice)
 
@@ -224,6 +246,11 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
             "x": first_dur_labels,
             "data": first_dur_counts,
             "n": len(first_sentence),
+        },
+        "field_count_dist": {
+            "x": list(range(field_x_max + 1)),
+            "data": field_counts,
+            "n": len(human),
         },
         "hangup_breakdown": hangup_breakdown(df_slice),
     }
@@ -264,12 +291,13 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
     turn_x_max = max(int(human_all["_max_turn_id"].max()) if len(human_all) else 1, 1)
     dur_x_max = max(int(answered_all["Duration (seconds)"].max()) if len(answered_all) else 30, 30)
     first_dur_x_max = max(int(first_sent_all["Duration (seconds)"].max()) if len(first_sent_all) else 10, 10)
+    field_x_max = int(human_all["_field_count"].max()) if len(human_all) else 0
 
     agents = sorted(df_enriched["Agent Name"].unique())
-    datasets = {ALL_KEY: slice_data(df_enriched, turn_x_max, dur_x_max, first_dur_x_max)}
+    datasets = {ALL_KEY: slice_data(df_enriched, turn_x_max, dur_x_max, first_dur_x_max, field_x_max)}
     for a in agents:
         datasets[a] = slice_data(df_enriched[df_enriched["Agent Name"] == a],
-                                 turn_x_max, dur_x_max, first_dur_x_max)
+                                 turn_x_max, dur_x_max, first_dur_x_max, field_x_max)
 
     # Per-row export records. Each row carries `_agent`, `_human`, `_full`, `_intent`,
     # `_duration`, `_max_turn`, `_assistant_turns` so JS can filter without re-parsing.
@@ -284,6 +312,7 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         rec["_duration"] = int(r["Duration (seconds)"])
         rec["_max_turn"] = int(r["_max_turn_id"])
         rec["_assistant_turns"] = int(r["_assistant_turns"])
+        rec["_field_count"] = int(r["_field_count"])
         rows.append(rec)
 
     return {
@@ -493,7 +522,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>4 · 早期挂断（真人接听内 · 互斥分桶）</h2>
+<h2>4 · 收集字段数量分布 (真人接听内 · 去除"购车意向") <span class="export-hint">点击柱子导出</span></h2>
+<p class="section-note">备注：从 <b>Structured Output</b> JSON 里数非 null/非空的字段数，排除 <b>购车意向</b>（那是意向标签，不是收集到的数据）。X 轴是该通采集到的字段数，越靠右说明 agent 把客户信息收得越全。</p>
+<div class="turn-card">
+  <div class="turn-card-body">
+    <div class="turn-bar"><div id="chart-field-count" class="chart"></div></div>
+    <div class="turn-donut"><div id="chart-field-count-donut" class="chart"></div></div>
+  </div>
+</div>
+
+<h2>5 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
   <div class="card">
     <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
@@ -571,7 +609,8 @@ const chartIds = ['chart-funnel',
                   'chart-turn-human', 'chart-turn-human-donut',
                   'chart-turn-full',  'chart-turn-full-donut',
                   'chart-turn-intent','chart-turn-intent-donut',
-                  'chart-duration', 'chart-first-sentence-dur'];
+                  'chart-duration', 'chart-first-sentence-dur',
+                  'chart-field-count', 'chart-field-count-donut'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
 
@@ -1151,12 +1190,80 @@ function renderEarlyHangupTable(rows) {{
   }});
 }}
 
+function renderFieldCountDist(fc) {{
+  // Bar (left 2/3) + donut (right 1/3), styled to match the turn-distribution
+  // cards. X is "# of non-null collected fields" (0..N). Each bar shows the
+  // count of human-answered calls with that many slots filled; label = share
+  // of the 真人接听 total. Donut shows the same data as a per-bucket pie.
+  const total = fc && fc.n ? fc.n : 0;
+  if (!total) {{
+    charts['chart-field-count'].clear();
+    charts['chart-field-count-donut'].clear();
+    return;
+  }}
+  // bar
+  charts['chart-field-count'].setOption({{
+    color: ['#06b6d4'],
+    tooltip: tooltipBase({{
+      trigger: 'axis', axisPointer: {{ type: 'shadow' }},
+      formatter: params => {{
+        const p = params[0];
+        const pct = (p.value / total * 100).toFixed(1);
+        return `<b>采集 ${{p.name}} 个字段</b><br>${{p.value}} 通 · ${{pct}}% / 真人接听 (n=${{total}})`;
+      }},
+    }}),
+    grid: {{ left: 4, right: 8, top: 22, bottom: 4, containLabel: true }},
+    xAxis: Object.assign({{ type: 'category', name: '字段数', data: fc.x,
+                            nameGap: 18,
+                            axisLabel: {{ color: MUTED, fontSize: 11, interval: 0 }} }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: `n=${{total}}`, nameGap: 8 }}, baseAxis),
+    series: [{{
+      name: '收集字段数量', type: 'bar', data: fc.data,
+      itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
+      label: {{
+        show: true, position: 'top', color: MUTED, fontSize: 10,
+        formatter: p => p.value > 0 ? `${{(p.value / total * 100).toFixed(0)}}%` : '',
+      }},
+    }}],
+  }}, true);
+  // donut
+  const slices = fc.data.map((v, i) => ({{ name: `${{fc.x[i]}} 个`, value: v }})).filter(d => d.value > 0);
+  charts['chart-field-count-donut'].setOption({{
+    color: ['#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#f43f5e'],
+    title: {{
+      text: `${{total}}`, subtext: '通',
+      left: '50%', top: '48%',
+      textAlign: 'center', textVerticalAlign: 'middle',
+      textStyle: {{ fontSize: 22, fontWeight: 700, color: TEXT }},
+      subtextStyle: {{ fontSize: 11, color: MUTED }},
+      itemGap: 2,
+    }},
+    tooltip: tooltipBase({{
+      trigger: 'item',
+      formatter: p => `<b>${{p.name}}</b><br>${{p.value}} 通 · ${{p.percent.toFixed(1)}}%`,
+    }}),
+    legend: {{ show: false }},
+    series: [{{
+      type: 'pie', radius: ['52%', '74%'], center: ['50%', '52%'],
+      avoidLabelOverlap: true,
+      itemStyle: {{ borderColor: '#ffffff', borderWidth: 1.5 }},
+      label: {{
+        color: TEXT, fontSize: 11,
+        formatter: p => p.percent >= 4 ? `${{p.name}}\\n${{p.percent.toFixed(0)}}%` : '',
+      }},
+      labelLine: {{ length: 6, length2: 4, lineStyle: {{ color: MUTED }} }},
+      data: slices,
+    }}],
+  }}, true);
+}}
+
 function render(key) {{
   const d = DATA.datasets[key];
   renderHero(d.totals, d.denominators);
   renderFunnel(d.totals);
   renderTurnTriad(d.turn_dist);
   renderDuration(d.duration_dist);
+  renderFieldCountDist(d.field_count_dist);
   renderEarlyHangupTable(d.early_hangup);
   renderFirstSentenceDur(d.first_sentence_dur);
 }}
@@ -1183,6 +1290,13 @@ TURN_SERIES.forEach(spec => {{
     const subset = scopedRows().filter(spec.filter).filter(r => r._max_turn === turnId);
     exportRows(subset, `turn-${{spec.key}}-id${{turnId}}`);
   }});
+}});
+
+charts['chart-field-count'].on('click', p => {{
+  if (p.componentType !== 'series') return;
+  const n = parseInt(p.name, 10);
+  const subset = scopedRows().filter(r => r._human && r._field_count === n);
+  exportRows(subset, `fields-${{n}}`);
 }});
 
 charts['chart-duration'].on('click', p => {{
