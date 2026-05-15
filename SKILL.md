@@ -119,6 +119,22 @@ xlsx 列：Call ID / Agent ID / Agent Name / Duration / Hangup Reason / Max turn
 
 漏斗是并列分支（完整转换 + 意向客户），不是严格上下层级——这点在 dashboard 的「口径定义」横条里也明示了，避免用户误读 Funnel chart 的内置百分比。
 
+## 多个文件并行分析
+
+每次跑 `run.sh <file>` 都是**独立 Python 进程，独立端口，独立 DataFrame**。所以一次会话里用户连续让你分析 A.xlsx 然后 B.xlsx 时：
+
+- 默认行为：**并行起两个面板**，A 在 `:8765`，B 在 OS 分配的空闲端口（比如 `:56123`），两个浏览器 tab 互不影响，可以对比看
+- 不要预设要"覆盖"或"清掉前一个"
+
+**只有当用户明确说**「换成 B」/「先关掉 A」/「停掉前面的」时才主动 `pkill -f serve_dashboard.py` 或针对 PID `kill` 掉前一个进程。
+
+查看 / 清理命令（如果用户问起）：
+
+```bash
+ps aux | grep serve_dashboard | grep -v grep   # 列出活着的面板
+pkill -f serve_dashboard.py                    # 一键关全部
+```
+
 ## 输出给用户怎么说
 
 跑完脚本后，把脚本 stdout 的 5 个漏斗数字直接 read 给用户（包括按 Agent Name 拆的），加一句「dashboard 写到 `<path>`，已经在浏览器打开」即可。具体图表交互让用户自己看，不要在对话里重复描述每张图。
