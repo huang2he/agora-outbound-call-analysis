@@ -61,7 +61,7 @@ Agora ConvoAI Console 默认导出的 CSV/XLSX，需要包含这些列：
 | 意向客户 | Structured Output 中 `购车意向 == "是"` |
 | N 句挂断 | 真人接听里 assistant 轮数恰好等于 N（互斥分桶） |
 
-完整口径和实现细节看 [SKILL.md](./SKILL.md)。
+完整数据字典和每个指标的精确定义看 [METRICS.md](./METRICS.md)。Skill 触发说明看 [SKILL.md](./SKILL.md)。
 
 ## 性能
 
