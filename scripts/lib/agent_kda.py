@@ -1,21 +1,31 @@
-"""Agent-视角 KDA 计算模块（Tab 2 数据后端）。
+"""Agent-视角 KDA 计算模块（Tab 2 数据后端）— v2 重写。
 
-设计文档：
-  20_项目/Agora 外呼分析看板/Agent-视角指标设计.md  （6 维度公式 § 3.2）
-  20_项目/Agora 外呼分析看板/Tab2 实现计划.md         （字段映射 + 工时）
+核心思路：把"客观漏斗"（拨打 / 接听 / 真人）和 agent 表现解耦。
+只在「有效会话」范围内分析 agent，避免首句挂断和系统兜底污染数据。
 
-关键设计决策（v0）：
-  - 第 1 关「车型」用 AND（购车品牌 AND 购车型号 都非空），依据 [[销冠Prompt v0]]
-    的硬下限"品牌+车型 缺一不可"。**这与 Tab 1 老的"或"口径不同**，故 Tab 1
-    现有 `is_full_with_model` 等逻辑保持不变，Tab 2 用本模块独立判定。
-  - 维度 3「首杀」/ 维度 4「滑顺」用关键词正则做近似，v1 再上 LLM。
-  - 通关判定严格线性（第 N 关 = 第 1..N 全过），与 Colin"一关关过"心智模型一致。
+有效会话定义（user 锁定 5/18）：
+  - 真人接听 (Hangup ∈ USER_HANGUP / AI_HANGUP)
+  - 至少有 1 个"真实 user turn"
+  - 真实 user turn = role=user AND 不是系统静默兜底 AND 不是 IVR/语音信箱
+
+判断系统兜底 user turn 的特征（从真实数据观察）：
+  1. metadata.source == "silence" → 静默超时系统注入的 think 占位
+  2. content 含 "识别客户没有响应" / "走静默兜底" → 同上
+  3. content 含 "请留下你的姓名" / "智语音留言" / "无法接听" / "帮你/您确认此人"
+     / "是否方便接听" → IVR / 语音信箱机器音 ASR 识别出来的
+
+4 关定义（Colin 5/17 锁定，5/18 修正第 1 关用 AND）：
+  - 第 1 关 车型 = 购车品牌 AND 购车型号 都非空
+  - 第 2 关 城市 = 购车城市 非空
+  - 第 3 关 时间 = 购车时间 非空
+  - 第 4 关 姓氏 = 购车姓名 非空
+
+严格线性递进：过第 N 关 ⇔ 第 1..N 全过。每通用 passed_levels_count → 0..4。
 """
 
 from __future__ import annotations
 
 import json
-import re
 import statistics
 from typing import Any
 
@@ -24,66 +34,76 @@ import pandas as pd
 
 # ─────────────────────── 关卡 / 字段映射 ────────────────────────
 
-# 第 N 关 → 涉及的 Structured Output 字段及组合逻辑
 LEVEL_FIELDS: dict[int, dict[str, Any]] = {
     1: {"name": "车型", "fields": ["购车品牌", "购车型号"], "logic": "all"},   # AND
     2: {"name": "城市", "fields": ["购车城市"],              "logic": "all"},
     3: {"name": "时间", "fields": ["购车时间"],              "logic": "all"},
     4: {"name": "姓氏", "fields": ["购车姓名"],              "logic": "all"},
 }
-PROVINCE_FALLBACK_FIELD = "购车省份"     # 城市的半通关辅助
-INTENT_FIELD            = "购车意向"     # 不进 4 关，Tab 1 用
+LEVEL_NAMES = [LEVEL_FIELDS[i]["name"] for i in (1, 2, 3, 4)]
+INTENT_FIELD = "购车意向"  # 不进 4 关
 
-# 维度参数（计划文档 §3.2 锁定）
-TURNS_FULL_PASS_MIN    = 5    # 5 轮拿全 = 100
-TURNS_FULL_PASS_MAX    = 15   # 15 轮 = 0
-FIRST_HIT_T1_WEIGHT    = 15
-FIRST_HIT_T2_WEIGHT    = 8
-FRICTION_MULTIPLIER    = 20
-VARIANCE_MULTIPLIER    = 1000
-EARLY_HANGUP_MAX_TURNS = 3    # assistant 轮数 ≤ 3 算"早挂断"
 
-# 综合分加权
-COMPOSITE_WEIGHTS: dict[str, float] = {
-    "击穿率": 0.30, "轮效":   0.20, "首杀":   0.15,
-    "滑顺":   0.15, "不偏科": 0.10, "抗挂":   0.10,
-}
+# ─────────────────────── 系统兜底文本识别 ───────────────────────
 
-# 关键词词典（v0 近似）：扫 transcript 找"agent 问到 + 用户实质给答"
-# 用 user turn 出现关键词作为命中标志（用户主动给出 = 信号最强）
-LEVEL_KEYWORDS_USER: dict[int, list[str]] = {
-    1: [  # 车型：车系/品牌/型号 词
-        "宝马", "奔驰", "奥迪", "丰田", "本田", "大众", "比亚迪", "理想", "蔚来",
-        "小鹏", "特斯拉", "保时捷", "雷克萨斯", "凯迪拉克", "沃尔沃", "捷豹", "路虎",
-        "卡宴", "极氪", "红旗", "长安", "吉利", "五菱", "哈弗", "传祺",
-    ],
-    2: [  # 城市
-        "上海", "北京", "广州", "深圳", "杭州", "成都", "重庆", "南京", "武汉", "西安",
-        "天津", "苏州", "郑州", "长沙", "青岛", "宁波", "无锡", "佛山", "东莞",
-        "合肥", "厦门", "济南", "福州", "贵阳", "昆明", "南宁", "兰州",
-    ],
-    3: [  # 时间
-        "月", "年底", "今年", "明年", "马上", "近期", "尽快", "下周", "下月", "立刻",
-        "半年", "一个月", "三个月", "现在", "随时", "等等", "考虑",
-    ],
-    4: [  # 姓氏
-        "姓", "我姓", "免贵", "我叫", "先生", "女士", "小姐",
-    ],
-}
+# 系统注入 / IVR ASR 文本特征。匹配任一即视为非真实用户发言。
+SYSTEM_USER_TURN_PATTERNS = [
+    "识别客户没有响应",
+    "走静默兜底",
+    "请留下你的姓名",
+    "请留下您的姓名",
+    "请留下姓名",
+    "智语音留言",
+    "无法接听",
+    "帮你确认此人",
+    "帮您确认此人",
+    "是否方便接听",
+    "您拨打的电话",
+    "已关机",
+    "暂时无法接听",
+    "稍后再拨",
+    "录制留言",
+]
 
-# Assistant 问询关键词（用来检测维度 4 "反复问"的 friction）
-LEVEL_KEYWORDS_ASSISTANT: dict[int, list[str]] = {
-    1: ["什么车", "哪款", "什么品牌", "什么车型", "您看重哪", "想买什么"],
-    2: ["哪个城市", "哪儿", "在哪", "哪里上牌", "上牌"],
-    3: ["什么时候", "几月", "什么时间", "近期", "什么时候买"],
-    4: ["怎么称呼", "贵姓", "您姓", "怎么称呼您"],
-}
+
+def is_real_user_turn(turn: dict) -> bool:
+    """user turn 是否算"客户真实开口"。
+
+    排除两类：
+    1. metadata.source == "silence" 的静默兜底占位
+    2. 内容匹配 IVR / 语音信箱文本指纹
+    """
+    if turn.get("role") != "user":
+        return False
+    meta = turn.get("metadata") or {}
+    if meta.get("source") == "silence":
+        return False
+    content = (turn.get("content") or "").strip()
+    if not content:
+        return False
+    for pat in SYSTEM_USER_TURN_PATTERNS:
+        if pat in content:
+            return False
+    return True
+
+
+def real_user_turn_count(transcript: list[dict]) -> int:
+    return sum(1 for t in transcript if is_real_user_turn(t))
+
+
+def is_valid_session(transcript: list[dict]) -> bool:
+    """有效会话 ⇔ 至少 1 个真实 user turn。"""
+    return real_user_turn_count(transcript) >= 1
+
+
+def total_turn_count(transcript: list[dict]) -> int:
+    """通话的总轮次 (assistant + user)，作为"花了几轮"的度量。"""
+    return sum(1 for t in transcript if t.get("role") in ("assistant", "user"))
 
 
 # ────────────────────────── 工具函数 ──────────────────────────
 
 def parse_structured_output(raw: Any) -> dict[str, Any]:
-    """容错解析 Structured Output 列。空 / 非法 / 'null' / 非 dict → {}."""
     if raw is None:
         return {}
     if isinstance(raw, dict):
@@ -98,252 +118,7 @@ def parse_structured_output(raw: Any) -> dict[str, Any]:
         return {}
 
 
-def _val_filled(v: Any) -> bool:
-    return v is not None and str(v).strip() not in ("", "null", "None")
-
-
-def passed_level(so: dict, level: int) -> bool:
-    """单通是否过第 N 关。`so` 是已解析的 Structured Output dict。"""
-    cfg = LEVEL_FIELDS.get(level)
-    if not cfg:
-        return False
-    checks = [_val_filled(so.get(f)) for f in cfg["fields"]]
-    if cfg["logic"] == "all":
-        return all(checks)
-    if cfg["logic"] == "any":
-        return any(checks)
-    return False
-
-
-def passed_levels_count(so: dict) -> int:
-    """该通按严格线性递进 (第 N 关需要 1..N 全过) 通过到第几关。返回 0..4."""
-    n = 0
-    for level in (1, 2, 3, 4):
-        if passed_level(so, level):
-            n = level
-        else:
-            break
-    return n
-
-
-def is_full_pass(so: dict) -> bool:
-    return passed_levels_count(so) == 4
-
-
-def is_human_answered(hangup: Any) -> bool:
-    return str(hangup or "").strip() in ("USER_HANGUP", "AI_HANGUP")
-
-
-# ─────────────────── 维度 3 首杀 (v0 关键词近似) ───────────────────
-
-def _user_first_hit_turn(transcript: list[dict], level: int) -> int | None:
-    """扫 transcript 找用户首次说出第 N 关关键词所在的 turn_id。"""
-    kws = LEVEL_KEYWORDS_USER.get(level, [])
-    if not kws:
-        return None
-    for t in transcript:
-        if t.get("role") != "user":
-            continue
-        content = str(t.get("content", ""))
-        if any(kw in content for kw in kws):
-            tid = t.get("turn_id")
-            if isinstance(tid, int):
-                return tid
-    return None
-
-
-def turn_at_level_hit(transcript: list[dict], level: int) -> int | None:
-    """对外接口：第 N 关字段在 transcript 中首次"命中"的 turn_id（v0 关键词近似）。
-    无 transcript / 没命中 → None。"""
-    return _user_first_hit_turn(transcript or [], level)
-
-
-# ─────────────────── 维度 4 滑顺 (v0 重复问近似) ───────────────────
-
-def detect_friction(transcript: list[dict]) -> dict[int, int]:
-    """v0：assistant turn 中第 N 关问询关键词出现次数 ≥ 2 → 记一次 friction。
-    返回 {1: 0/1, 2: 0/1, 3: 0/1, 4: 0/1}."""
-    counts = {1: 0, 2: 0, 3: 0, 4: 0}
-    if not transcript:
-        return counts
-    for level in (1, 2, 3, 4):
-        kws = LEVEL_KEYWORDS_ASSISTANT[level]
-        hits = 0
-        for t in transcript:
-            if t.get("role") != "assistant":
-                continue
-            content = str(t.get("content", ""))
-            if any(kw in content for kw in kws):
-                hits += 1
-                if hits >= 2:
-                    counts[level] = 1
-                    break
-    return counts
-
-
-# ─────────────────────── 产品视角 7 层漏斗 ───────────────────────
-
-def compute_product_funnel(df: pd.DataFrame) -> dict:
-    """7 层产品视角漏斗：拨打 → 接听 → 真人 → 过L1 → 过L2 → 过L3 → 全关"""
-    if df.empty:
-        return {"layers": [("拨打", 0), ("接听", 0), ("真人", 0),
-                            ("过车型关", 0), ("过城市关", 0),
-                            ("过时间关", 0), ("全关通过", 0)]}
-
-    total = len(df)
-    dur = pd.to_numeric(df["Duration (seconds)"], errors="coerce").fillna(0)
-    answered = int((dur > 0).sum())
-    human_mask = df["Hangup Reason"].apply(is_human_answered)
-    human = int(human_mask.sum())
-
-    so_parsed = df["Structured Output"].apply(parse_structured_output)
-
-    # 严格线性：过第 N 关 ⇔ 1..N 全过
-    pass_n = so_parsed.apply(passed_levels_count)
-    l1 = int((pass_n >= 1).sum())
-    l2 = int((pass_n >= 2).sum())
-    l3 = int((pass_n >= 3).sum())
-    l4 = int((pass_n >= 4).sum())
-    return {
-        "layers": [
-            ("拨打", total),
-            ("接听", answered),
-            ("真人", human),
-            ("过车型关", l1),
-            ("过城市关", l2),
-            ("过时间关", l3),
-            ("全关通过", l4),
-        ]
-    }
-
-
-# ─────────────────────── 6 维度雷达计算 ───────────────────────
-
-def _safe_score(x: float) -> int:
-    return max(0, min(100, int(round(x))))
-
-
-def compute_agent_radar(df_agent: pd.DataFrame) -> dict:
-    """一个 Agent Name 的所有 calls → 6 维度 + _raw 细节。
-
-    所有维度都在"真人接听"范围内算（除维度 6"抗挂"本身用早挂断率，也基于真人接听）。
-    如果某 Agent 没有真人接听，所有维度回退 0。
-    """
-    empty_raw = {
-        "n_calls": len(df_agent), "n_human": 0, "pass_full_rate": 0.0,
-        "avg_turns_when_full": 0.0,
-        "L1_pass": 0.0, "L2_pass": 0.0, "L3_pass": 0.0, "L4_pass": 0.0,
-        "avg_T1": None, "avg_T2": None,
-        "avg_friction": 0.0,
-        "early_hangup_rate": 0.0,
-    }
-
-    if df_agent.empty:
-        return {**{k: 0 for k in COMPOSITE_WEIGHTS}, "_raw": empty_raw}
-
-    # 准备衍生列（不改原 df）
-    human_mask = df_agent["Hangup Reason"].apply(is_human_answered)
-    human_df = df_agent[human_mask].copy()
-    n_human = len(human_df)
-    if n_human == 0:
-        return {**{k: 0 for k in COMPOSITE_WEIGHTS}, "_raw": {**empty_raw, "n_human": 0}}
-
-    so_parsed = human_df["Structured Output"].apply(parse_structured_output)
-    pass_n = so_parsed.apply(passed_levels_count)
-
-    # ── 维度 1 击穿率 ──
-    n_full = int((pass_n == 4).sum())
-    pass_full_rate = n_full / n_human
-    s1 = _safe_score(pass_full_rate * 100)
-
-    # ── 维度 2 轮效 ──（仅全过通话）
-    if n_full > 0:
-        transcripts = human_df.loc[pass_n == 4, "Transcript"].apply(_parse_transcript)
-        max_turns = transcripts.apply(_max_turn).tolist()
-        max_turns = [t for t in max_turns if t > 0]
-        avg_turns = statistics.mean(max_turns) if max_turns else 0
-        # 5 轮拿全 = 100, 15 轮 = 0
-        s2 = _safe_score(100 - max(0, avg_turns - TURNS_FULL_PASS_MIN) * (100 / (TURNS_FULL_PASS_MAX - TURNS_FULL_PASS_MIN)))
-    else:
-        avg_turns = 0
-        s2 = 0
-
-    # ── 维度 3 首杀 ──（v0 关键词近似，对全部真人接听算）
-    transcripts_all = human_df["Transcript"].apply(_parse_transcript)
-    t1_hits = transcripts_all.apply(lambda t: turn_at_level_hit(t, 1))
-    t2_hits = transcripts_all.apply(lambda t: turn_at_level_hit(t, 2))
-    t1_vals = [v for v in t1_hits if isinstance(v, int)]
-    t2_vals = [v for v in t2_hits if isinstance(v, int)]
-    avg_t1 = statistics.mean(t1_vals) if t1_vals else None
-    avg_t2 = statistics.mean(t2_vals) if t2_vals else None
-    # 没命中视为最大惩罚（用 avg_turns 兜底，或干脆给 0 分项）
-    penalty_t1 = (avg_t1 if avg_t1 is not None else 10) * FIRST_HIT_T1_WEIGHT / 10
-    penalty_t2 = (avg_t2 if avg_t2 is not None else 10) * FIRST_HIT_T2_WEIGHT / 10
-    s3 = _safe_score(100 - penalty_t1 - penalty_t2)
-
-    # ── 维度 4 滑顺 ──（friction = 重复问的关数 0..4）
-    fric_df = transcripts_all.apply(detect_friction)
-    fric_per_call = fric_df.apply(lambda d: sum(d.values()))
-    avg_friction = float(fric_per_call.mean()) if len(fric_per_call) else 0.0
-    s4 = _safe_score(100 - avg_friction * FRICTION_MULTIPLIER)
-
-    # ── 维度 5 不偏科 ──（4 关各自通过率的方差）
-    l1p = int(so_parsed.apply(lambda s: passed_level(s, 1)).sum()) / n_human
-    l2p = int(so_parsed.apply(lambda s: passed_level(s, 2)).sum()) / n_human
-    l3p = int(so_parsed.apply(lambda s: passed_level(s, 3)).sum()) / n_human
-    l4p = int(so_parsed.apply(lambda s: passed_level(s, 4)).sum()) / n_human
-    var = statistics.pvariance([l1p, l2p, l3p, l4p])
-    s5 = _safe_score(100 - var * VARIANCE_MULTIPLIER)
-
-    # ── 维度 6 抗挂 ──（assistant 轮数 ≤ 3 算早挂断）
-    asst_turns = transcripts_all.apply(_assistant_turn_count)
-    early = int((asst_turns <= EARLY_HANGUP_MAX_TURNS).sum())
-    early_rate = early / n_human
-    s6 = _safe_score((1 - early_rate) * 100)
-
-    composite = sum(
-        v * COMPOSITE_WEIGHTS[k]
-        for k, v in zip(("击穿率", "轮效", "首杀", "滑顺", "不偏科", "抗挂"),
-                         (s1, s2, s3, s4, s5, s6))
-    )
-
-    return {
-        "击穿率": s1, "轮效": s2, "首杀": s3,
-        "滑顺": s4, "不偏科": s5, "抗挂": s6,
-        "综合分": _safe_score(composite),
-        "_raw": {
-            "n_calls": len(df_agent),
-            "n_human": n_human,
-            "n_full": n_full,
-            "pass_full_rate": round(pass_full_rate, 4),
-            "avg_turns_when_full": round(avg_turns, 2),
-            "L1_pass": round(l1p, 4),
-            "L2_pass": round(l2p, 4),
-            "L3_pass": round(l3p, 4),
-            "L4_pass": round(l4p, 4),
-            "avg_T1": round(avg_t1, 2) if avg_t1 is not None else None,
-            "avg_T2": round(avg_t2, 2) if avg_t2 is not None else None,
-            "avg_friction": round(avg_friction, 3),
-            "early_hangup_rate": round(early_rate, 4),
-        },
-    }
-
-
-def compute_agent_ranking(df: pd.DataFrame) -> list[dict]:
-    """对每个 Agent Name 跑 radar，按综合分降序排，返回 list[dict]."""
-    rows: list[dict] = []
-    for name, sub in df.groupby("Agent Name"):
-        r = compute_agent_radar(sub)
-        r["agent"] = str(name)
-        rows.append(r)
-    rows.sort(key=lambda x: -x.get("综合分", 0))
-    return rows
-
-
-# ───────────────────── transcript 工具内联 ─────────────────────
-# 注意：build_dashboard.py 也有自己的 transcript 工具。这里独立一份避免循环 import。
-
-def _parse_transcript(raw: Any) -> list[dict]:
+def parse_transcript(raw: Any) -> list[dict]:
     if raw is None:
         return []
     if isinstance(raw, list):
@@ -358,10 +133,181 @@ def _parse_transcript(raw: Any) -> list[dict]:
         return []
 
 
-def _max_turn(transcript: list[dict]) -> int:
-    ids = [t.get("turn_id") for t in transcript if isinstance(t.get("turn_id"), int)]
-    return max(ids) if ids else 0
+def _val_filled(v: Any) -> bool:
+    return v is not None and str(v).strip() not in ("", "null", "None")
 
 
-def _assistant_turn_count(transcript: list[dict]) -> int:
-    return sum(1 for t in transcript if t.get("role") == "assistant")
+def passed_level(so: dict, level: int) -> bool:
+    cfg = LEVEL_FIELDS.get(level)
+    if not cfg:
+        return False
+    checks = [_val_filled(so.get(f)) for f in cfg["fields"]]
+    return all(checks) if cfg["logic"] == "all" else any(checks)
+
+
+def passed_levels_count(so: dict) -> int:
+    """按严格线性，0..4。第 1 关没过就停在 0。"""
+    n = 0
+    for level in (1, 2, 3, 4):
+        if passed_level(so, level):
+            n = level
+        else:
+            break
+    return n
+
+
+def filled_slots_independent(so: dict) -> set[str]:
+    """4 关各自独立的填充情况（不要求线性）。给"缺哪个槽位"统计用。"""
+    return {LEVEL_FIELDS[i]["name"] for i in (1, 2, 3, 4) if passed_level(so, i)}
+
+
+def is_human_answered(hangup: Any) -> bool:
+    return str(hangup or "").strip() in ("USER_HANGUP", "AI_HANGUP")
+
+
+# ─────────────────────── 0 关未通关原因（启发式） ───────────────────────
+
+# 用户拒绝 / 没意向相关的关键词
+REJECT_KEYWORDS = ["不需要", "不买", "不考虑", "已经买", "买好了", "买了", "没意向",
+                    "不想", "不感兴趣", "别打了", "别再打"]
+BUSY_KEYWORDS   = ["在开车", "正忙", "在上班", "在开会", "在外面", "等会", "不方便"]
+ANGRY_KEYWORDS  = ["操", "傻逼", "滚", "妈了个", "草泥"]
+QUERY_KEYWORDS  = ["哪里来", "什么公司", "你哪位", "你谁", "怎么知道我"]
+
+
+def classify_zero_pass_reason(transcript: list[dict]) -> str:
+    """0 关通话的启发式原因分类。看真实 user turn 里的关键词。
+
+    返回中文标签：'拒绝/无意向' / '忙/没空' / '客户骂人' / '质疑身份' / '聊别的/未触及' / '其他'
+    """
+    real_turns = [t for t in transcript if is_real_user_turn(t)]
+    if not real_turns:
+        return "其他"
+    text = " ".join((t.get("content") or "") for t in real_turns)
+    if any(kw in text for kw in ANGRY_KEYWORDS):
+        return "客户骂人"
+    if any(kw in text for kw in REJECT_KEYWORDS):
+        return "拒绝/无意向"
+    if any(kw in text for kw in BUSY_KEYWORDS):
+        return "忙/没空"
+    if any(kw in text for kw in QUERY_KEYWORDS):
+        return "质疑身份"
+    return "聊别的/未触及"
+
+
+# ─────────────────────── 主入口：Tab 2 数据计算 ───────────────────────
+
+def compute_tab2_data(df: pd.DataFrame) -> dict:
+    """整张 Tab 2 的数据后端入口。
+
+    输出形如:
+    {
+        "global": {
+            "n_total": 1805,
+            "n_human": 1722,
+            "n_valid": 622,
+            "n_first_hangup": 1100,
+            "n_silence_or_ivr": 0,
+            "bucket": [
+                {"level": 0, "count": 320, "pct": 0.51, "avg_turns": 3.2, "avg_duration": 18.5,
+                 "reasons": {"拒绝/无意向": 180, ...}},
+                {"level": 1, ...},
+                ...
+            ],
+            "slot_pass_in_valid": {"车型": 88, "城市": 64, "时间": 41, "姓氏": 23},
+        },
+        "agents": [
+            {"agent": "汽车营销项目-5/14-Agent1-hz", ...same shape as global...},
+            ...
+        ]
+    }
+    """
+    # 解析 transcript / structured（一次性，按行）
+    work = df.copy()
+    work["_transcript"] = work["Transcript"].apply(parse_transcript)
+    work["_structured"] = work["Structured Output"].apply(parse_structured_output)
+    work["_human"] = work["Hangup Reason"].apply(is_human_answered)
+    work["_assistant_turns"] = work["_transcript"].apply(
+        lambda t: sum(1 for x in t if x.get("role") == "assistant"))
+    work["_real_user_turns"] = work["_transcript"].apply(real_user_turn_count)
+    work["_valid"] = work["_human"] & (work["_real_user_turns"] >= 1)
+    work["_pass_n"] = work["_structured"].apply(passed_levels_count)
+    work["_total_turns"] = work["_transcript"].apply(total_turn_count)
+    work["Duration (seconds)"] = pd.to_numeric(work["Duration (seconds)"], errors="coerce").fillna(0)
+
+    return {
+        "global": _bucket_breakdown(work, label="全部"),
+        "agents": [
+            _bucket_breakdown(sub, label=name)
+            for name, sub in work.groupby("Agent Name")
+        ],
+        "level_fields": {
+            str(k): {"name": v["name"], "fields": v["fields"], "logic": v["logic"]}
+            for k, v in LEVEL_FIELDS.items()
+        },
+    }
+
+
+def _bucket_breakdown(df: pd.DataFrame, label: str) -> dict:
+    """对一个 df（全部 or 单个 Agent）按通关数 0..4 分桶。"""
+    n_total = len(df)
+    n_human = int(df["_human"].sum())
+    valid = df[df["_valid"]].copy()
+    n_valid = len(valid)
+    # 首句挂断 = 真人接听 且 assistant 轮 == 1
+    n_first_hangup = int((df["_human"] & (df["_assistant_turns"] <= 1)).sum())
+    # 系统兜底/IVR 主导 = 真人接听 但 _real_user_turns == 0 且不是首句挂断
+    n_silence_or_ivr = int((df["_human"] & (df["_real_user_turns"] == 0) & (df["_assistant_turns"] > 1)).sum())
+
+    # 4 关各自独立通过率（在有效会话内）
+    slot_pass = {name: 0 for name in LEVEL_NAMES}
+    for so in valid["_structured"]:
+        for name in filled_slots_independent(so):
+            slot_pass[name] += 1
+
+    buckets = []
+    for level in (0, 1, 2, 3, 4):
+        sub = valid[valid["_pass_n"] == level]
+        cnt = len(sub)
+        if cnt:
+            avg_turns = round(float(sub["_total_turns"].mean()), 2)
+            avg_duration = round(float(sub["Duration (seconds)"].mean()), 1)
+            avg_real_user = round(float(sub["_real_user_turns"].mean()), 2)
+        else:
+            avg_turns = avg_duration = avg_real_user = 0.0
+
+        # 槽位填充情况 (仅对 1/2/3 关，因为 0 关全无、4 关全有)
+        slot_fill = {name: 0 for name in LEVEL_NAMES}
+        for so in sub["_structured"]:
+            for name in filled_slots_independent(so):
+                slot_fill[name] += 1
+
+        # 0 关原因分布
+        reasons = {}
+        if level == 0:
+            from collections import Counter
+            r = Counter(classify_zero_pass_reason(t) for t in sub["_transcript"])
+            reasons = dict(r.most_common())
+
+        buckets.append({
+            "level": level,
+            "count": cnt,
+            "pct_of_valid": round(cnt / n_valid * 100, 1) if n_valid else 0.0,
+            "avg_turns": avg_turns,
+            "avg_duration": avg_duration,
+            "avg_real_user_turns": avg_real_user,
+            "slot_fill": slot_fill,
+            "reasons": reasons,
+        })
+
+    return {
+        "label": label,
+        "n_total": n_total,
+        "n_human": n_human,
+        "n_valid": n_valid,
+        "n_first_hangup": n_first_hangup,
+        "n_silence_or_ivr": n_silence_or_ivr,
+        "valid_rate_of_human": round(n_valid / n_human * 100, 1) if n_human else 0.0,
+        "slot_pass_in_valid": slot_pass,
+        "buckets": buckets,
+    }

@@ -307,6 +307,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             payload = json.dumps(snap, ensure_ascii=False).encode("utf-8")
             self._send(200, payload, "application/json; charset=utf-8")
+        elif self.path == "/llm-fail-status":
+            try:
+                from lib import llm_fail_analysis as F
+            except ImportError:
+                from scripts.lib import llm_fail_analysis as F
+            payload = json.dumps(F.status_snapshot(), ensure_ascii=False).encode("utf-8")
+            self._send(200, payload, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -566,6 +573,20 @@ def main() -> int:
     # Kick off the LLM intent-truth job in background so by the time the user
     # actually clicks the LLM button results are usually already done.
     kickoff_intent_job(enriched)
+
+    # Tab 2 失败分析 LLM 任务（独立于意向真伪，分别用不同模型可能）
+    try:
+        from lib import llm_fail_analysis as F
+    except ImportError:
+        from scripts.lib import llm_fail_analysis as F
+    # 通过环境变量可选择采样：OPENAI_FAIL_SAMPLE_PER_BUCKET=20 → 每 (agent, pass_n)
+    # bucket 随机取 20 通跑 LLM。默认全量。
+    sample = os.environ.get("OPENAI_FAIL_SAMPLE_PER_BUCKET")
+    try:
+        sample_limit = int(sample) if sample else None
+    except ValueError:
+        sample_limit = None
+    F.kickoff(enriched, sample_limit=sample_limit)
 
     if not args.no_open:
         threading.Timer(0.4, lambda: webbrowser.open(local_url)).start()
