@@ -368,12 +368,30 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         rec["_structured"] = r["_structured"]
         rows.append(rec)
 
+    # ── Tab 2 数据（Agent-视角 KDA / 产品视角漏斗 / 排行榜）─────────────────
+    # 关键设计：Tab 2 用独立的 agent_kda 模块计算，关卡口径（车型 = 品牌 AND 型号）
+    # 与 Tab 1 的"完整转换"（车型 = 品牌 OR 型号）刻意不同；Tab 1 数字保持不变。
+    try:
+        from lib import agent_kda
+    except ImportError:
+        from scripts.lib import agent_kda  # 备用 path（直接 python 跑而非 -m 模式）
+    tab2 = {
+        "product_funnel": agent_kda.compute_product_funnel(df_enriched),
+        "agent_ranking": agent_kda.compute_agent_ranking(df_enriched),
+        "level_fields": {
+            str(k): {"name": v["name"], "fields": v["fields"], "logic": v["logic"]}
+            for k, v in agent_kda.LEVEL_FIELDS.items()
+        },
+        "composite_weights": agent_kda.COMPOSITE_WEIGHTS,
+    }
+
     return {
         "options": [{"key": ALL_KEY, "label": f"{ALL_LABEL} (n={len(df_enriched)})"}]
         + [{"key": a, "label": f"{a} (n={datasets[a]['n']})"} for a in agents],
         "datasets": datasets,
         "rows": rows,
         "all_key": ALL_KEY,
+        "tab2": tab2,
     }
 
 
@@ -578,6 +596,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .modal .progress {{ margin-top: 12px; font-size: 12px; color: var(--muted); }}
   .modal .progress .bar {{ background: var(--panel-2); border-radius: 4px; height: 6px; margin-top: 6px; overflow: hidden; }}
   .modal .progress .bar > div {{ background: var(--accent); height: 100%; width: 0%; transition: width 0.2s; }}
+
+  /* ─── Tab 切换 ─── */
+  .tab-bar {{ display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 12px; }}
+  .tab-btn {{ background: none; border: none; padding: 9px 16px; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; }}
+  .tab-btn:hover {{ color: var(--text); }}
+  .tab-btn.active {{ color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }}
+  .tab-content {{ display: none; }}
+  .tab-content.active {{ display: block; }}
+
+  /* ─── Tab 2 layout ─── */
+  .t2-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+  @media (max-width: 1100px) {{ .t2-grid {{ grid-template-columns: 1fr; }} }}
+  .t2-ranking-row {{ display: grid; grid-template-columns: 38px 1fr 70px repeat(6, 56px) 64px; gap: 4px; padding: 7px 10px; align-items: center; font-size: 12px; border-radius: 6px; cursor: pointer; transition: background 0.1s; }}
+  .t2-ranking-row:hover {{ background: var(--panel-2); }}
+  .t2-ranking-row.active {{ background: rgba(37,99,235,0.10); border: 1px solid rgba(37,99,235,0.30); }}
+  .t2-ranking-row .rk {{ font-weight: 700; color: var(--muted); text-align: center; }}
+  .t2-ranking-row .ag {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }}
+  .t2-ranking-row .composite {{ text-align: right; font-weight: 700; font-size: 14px; color: var(--accent); font-variant-numeric: tabular-nums; }}
+  .t2-ranking-row .score {{ text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }}
+  .t2-ranking-row .score.zero {{ color: var(--muted); opacity: 0.5; }}
+  .t2-ranking-head {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; padding: 0 10px 4px; border-bottom: 1px solid var(--border); margin-bottom: 4px; font-weight: 500; }}
+  .t2-ranking-head .right {{ text-align: right; }}
+  .t2-detail-head {{ display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }}
+  .t2-detail-head .name {{ font-size: 16px; font-weight: 600; color: var(--text); }}
+  .t2-detail-head .sub {{ font-size: 12px; color: var(--muted); }}
+  .t2-level-row {{ display: grid; grid-template-columns: 64px 1fr 80px; gap: 8px; align-items: center; margin: 4px 0; font-size: 12px; }}
+  .t2-level-row .label {{ color: var(--muted); }}
+  .t2-level-row .bar {{ height: 12px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }}
+  .t2-level-row .bar > div {{ height: 100%; background: linear-gradient(90deg, #2563eb, #14b8a6); border-radius: 3px; }}
+  .t2-level-row .val {{ text-align: right; color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }}
+  .t2-weights-note {{ font-size: 11px; color: var(--muted); padding: 8px 12px; background: var(--panel-2); border-radius: 6px; margin-top: 8px; line-height: 1.5; }}
 </style>
 </head>
 <body>
@@ -588,13 +637,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <h1>Agora 外呼分析 <span class="accent">·</span> <span style="color:var(--muted); font-weight:400;">{source}</span></h1>
     <div class="meta" style="margin-top:6px;">总通话 <code>{total}</code> · Agent Name 数 <code>{n_agents}</code></div>
   </div>
-  <div class="controls">
+  <div class="controls" id="tab1-controls">
     <label for="agent-select">范围</label>
     <select id="agent-select">
       {select_options}
     </select>
   </div>
 </header>
+
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="overview">产品总览</button>
+  <button class="tab-btn" data-tab="agent">Agent 视角 (KDA)</button>
+</div>
+
+<div id="tab-overview" class="tab-content active">
 
 <div class="defs">
   接听 = <code>Duration &gt; 0</code> · 真人接听 = <code>USER/AI_HANGUP</code> · 完整转换 = <code>Structured Output 无 null</code> · 意向 = <code>购车意向="是"</code> · N 句挂断 = <code>真人接听里 assistant 轮数恰好 = N</code>
@@ -672,6 +728,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="chart-first-sentence-dur" class="chart"></div>
   </div>
 </div>
+
+</div><!-- /tab-overview -->
+
+<div id="tab-agent" class="tab-content">
+
+  <div class="defs">
+    Tab 2 关卡（独立于 Tab 1 的完整转换口径，<b>车型关用 AND</b>）：
+    <code>第 1 关 车型 = 购车品牌 AND 购车型号</code> ·
+    <code>第 2 关 城市 = 购车城市</code> ·
+    <code>第 3 关 时间 = 购车时间</code> ·
+    <code>第 4 关 姓氏 = 购车姓名</code>。严格线性递进：过第 N 关 ⇔ 第 1..N 全过。
+  </div>
+
+  <h2>1 · 产品视角漏斗 (7 层)</h2>
+  <p class="section-note">从 拨打 → 接听 → 真人 → 一关关闯，看在哪一步丢的最多。</p>
+  <div class="card"><div id="t2-chart-funnel" class="chart tall"></div></div>
+
+  <h2>2 · Agent 排行榜</h2>
+  <p class="section-note">综合分 = 击穿率 × 0.3 + 轮效 × 0.2 + 首杀 × 0.15 + 滑顺 × 0.15 + 不偏科 × 0.1 + 抗挂 × 0.1。点击行查看该 Agent 详情。</p>
+  <div class="card">
+    <div class="t2-ranking-head" style="display: grid; grid-template-columns: 38px 1fr 70px repeat(6, 56px) 64px; gap: 4px;">
+      <div>#</div><div>Agent</div><div class="right">通话数</div>
+      <div class="right">击穿</div><div class="right">轮效</div><div class="right">首杀</div>
+      <div class="right">滑顺</div><div class="right">不偏科</div><div class="right">抗挂</div>
+      <div class="right">综合</div>
+    </div>
+    <div id="t2-ranking-body"></div>
+  </div>
+
+  <h2>3 · Agent 详情 <span id="t2-detail-name" style="color:var(--muted); font-weight:400; font-size:13px; margin-left:6px;"></span></h2>
+  <div class="t2-grid">
+    <div class="card">
+      <div class="t2-detail-head">
+        <div class="name">KDA 雷达</div>
+        <div class="sub" id="t2-detail-sub"></div>
+      </div>
+      <div id="t2-chart-radar" class="chart" style="height: 360px;"></div>
+    </div>
+    <div class="card">
+      <div class="t2-detail-head">
+        <div class="name">4 关通过率</div>
+        <div class="sub">独立看每关通过率（不强求线性递进）</div>
+      </div>
+      <div id="t2-level-bars"></div>
+      <div class="t2-weights-note" id="t2-raw-note"></div>
+    </div>
+  </div>
+
+</div><!-- /tab-agent -->
 
 <div id="toast" class="toast"></div>
 
@@ -769,7 +874,8 @@ const chartIds = ['chart-funnel',
                   'chart-turn-full',  'chart-turn-full-donut',
                   'chart-turn-intent','chart-turn-intent-donut',
                   'chart-duration', 'chart-first-sentence-dur',
-                  'chart-field-count', 'chart-field-count-donut'];
+                  'chart-field-count', 'chart-field-count-donut',
+                  't2-chart-funnel', 't2-chart-radar'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
 
@@ -1560,6 +1666,151 @@ charts['chart-duration'].on('click', p => {{
 window.addEventListener('resize', () => {{
   Object.values(charts).forEach(c => c.resize());
 }});
+
+// ──────────────────────────────────────────────────────────────────────────
+// Tab 2 · Agent 视角 (KDA)
+// ──────────────────────────────────────────────────────────────────────────
+
+const T2 = DATA.tab2 || null;
+const DIM_NAMES = ['击穿率', '轮效', '首杀', '滑顺', '不偏科', '抗挂'];
+
+function renderT2Funnel() {{
+  if (!T2) return;
+  const layers = T2.product_funnel.layers;
+  const total = layers[0][1] || 1;
+  const data = layers.map(([name, val]) => ({{
+    name, value: val, pct: (val / total * 100).toFixed(1),
+  }}));
+  charts['t2-chart-funnel'].setOption({{
+    color: ['#2563eb', '#3b82f6', '#06b6d4', '#14b8a6', '#22c55e', '#f59e0b', '#a855f7'],
+    tooltip: tooltipBase({{
+      trigger: 'item',
+      formatter: p => `<b>${{p.data.name}}</b><br>${{p.data.value}} 通 · ${{p.data.pct}}% / 总`,
+    }}),
+    series: [{{
+      type: 'funnel', sort: 'descending', gap: 3,
+      left: '6%', right: '6%', top: '2%', bottom: '2%',
+      label: {{ show: true, position: 'inside', color: '#fff', fontWeight: 600,
+                formatter: p => `${{p.data.name}}  ${{p.data.value}}` }},
+      labelLine: {{ show: false }},
+      itemStyle: {{ borderColor: '#fff', borderWidth: 2 }},
+      data,
+    }}],
+  }}, true);
+}}
+
+function renderT2Ranking() {{
+  if (!T2) return;
+  const body = document.getElementById('t2-ranking-body');
+  const rows = T2.agent_ranking;
+  if (!rows.length) {{ body.innerHTML = '<div class="empty">无 Agent 数据</div>'; return; }}
+  const medals = ['🥇', '🥈', '🥉'];
+  body.innerHTML = rows.map((r, i) => {{
+    const rk = i < 3 ? medals[i] : (i + 1);
+    const sc = (v) => `<div class="score ${{v === 0 ? 'zero' : ''}}">${{v}}</div>`;
+    return `<div class="t2-ranking-row" data-agent="${{escapeAttr(r.agent)}}">
+      <div class="rk">${{rk}}</div>
+      <div class="ag" title="${{escapeAttr(r.agent)}}">${{escapeHtml(r.agent)}}</div>
+      <div class="score">${{r._raw.n_human}}</div>
+      ${{sc(r['击穿率'])}}${{sc(r['轮效'])}}${{sc(r['首杀'])}}
+      ${{sc(r['滑顺'])}}${{sc(r['不偏科'])}}${{sc(r['抗挂'])}}
+      <div class="composite">${{r['综合分']}}</div>
+    </div>`;
+  }}).join('');
+  body.querySelectorAll('.t2-ranking-row').forEach(el => {{
+    el.addEventListener('click', () => selectT2Agent(el.getAttribute('data-agent')));
+  }});
+  // 默认选第一名
+  if (rows.length) selectT2Agent(rows[0].agent);
+}}
+
+function escapeHtml(s) {{
+  return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
+}}
+function escapeAttr(s) {{ return escapeHtml(s); }}
+
+function selectT2Agent(agentName) {{
+  // active 行高亮
+  document.querySelectorAll('.t2-ranking-row').forEach(el => {{
+    el.classList.toggle('active', el.getAttribute('data-agent') === agentName);
+  }});
+  const r = T2.agent_ranking.find(x => x.agent === agentName);
+  if (!r) return;
+
+  document.getElementById('t2-detail-name').textContent = '· ' + agentName;
+  document.getElementById('t2-detail-sub').textContent =
+    `n=${{r._raw.n_calls}} · 真人接听 ${{r._raw.n_human}} · 全关通过 ${{r._raw.n_full}} · 综合分 ${{r['综合分']}}`;
+
+  // Radar
+  charts['t2-chart-radar'].setOption({{
+    color: ['#2563eb'],
+    tooltip: tooltipBase({{}}),
+    radar: {{
+      indicator: DIM_NAMES.map(name => ({{ name, max: 100 }})),
+      radius: '68%', center: ['50%', '52%'],
+      axisName: {{ color: TEXT, fontSize: 12, fontWeight: 500 }},
+      splitArea: {{ areaStyle: {{ color: ['rgba(37,99,235,0.02)', 'rgba(37,99,235,0.06)'] }} }},
+      splitLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+    }},
+    series: [{{
+      type: 'radar',
+      data: [{{
+        value: DIM_NAMES.map(k => r[k]),
+        name: agentName,
+        areaStyle: {{ color: 'rgba(37,99,235,0.20)' }},
+        lineStyle: {{ color: '#2563eb', width: 2 }},
+        itemStyle: {{ color: '#2563eb' }},
+        label: {{ show: true, color: TEXT, fontSize: 11, fontWeight: 600,
+                  formatter: p => p.value > 0 ? p.value : '' }},
+      }}],
+    }}],
+  }}, true);
+
+  // 4 关通过率
+  const levelData = [
+    {{ label: '车型', val: r._raw.L1_pass }},
+    {{ label: '城市', val: r._raw.L2_pass }},
+    {{ label: '时间', val: r._raw.L3_pass }},
+    {{ label: '姓氏', val: r._raw.L4_pass }},
+  ];
+  document.getElementById('t2-level-bars').innerHTML = levelData.map(d => {{
+    const pct = (d.val * 100).toFixed(1);
+    return `<div class="t2-level-row">
+      <div class="label">第 ${{levelData.indexOf(d) + 1}} 关 ${{d.label}}</div>
+      <div class="bar"><div style="width: ${{Math.min(d.val * 100, 100)}}%;"></div></div>
+      <div class="val">${{pct}}%</div>
+    </div>`;
+  }}).join('');
+
+  document.getElementById('t2-raw-note').innerHTML = `
+    <b>原始数据：</b>
+    全关通过 ${{r._raw.n_full}} / ${{r._raw.n_human}} = ${{(r._raw.pass_full_rate * 100).toFixed(1)}}%
+    · 全过平均轮次 ${{r._raw.avg_turns_when_full || '-'}}
+    · 早挂断率 ${{(r._raw.early_hangup_rate * 100).toFixed(1)}}%
+    · 首杀-T1 ${{r._raw.avg_T1 !== null ? r._raw.avg_T1 : '-'}}
+    · 首杀-T2 ${{r._raw.avg_T2 !== null ? r._raw.avg_T2 : '-'}}
+    · 平均 friction ${{r._raw.avg_friction}}
+  `;
+}}
+
+// ── Tab 切换 ──
+document.querySelectorAll('.tab-btn').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    const tabId = 'tab-' + btn.dataset.tab;
+    document.getElementById(tabId).classList.add('active');
+    // Tab 1 的下拉框只在 overview 里有意义
+    document.getElementById('tab1-controls').style.display = btn.dataset.tab === 'overview' ? '' : 'none';
+    // 切到 Tab 2 → resize ECharts (容器从 display:none 变 block 时 canvas 尺寸需要重算)
+    setTimeout(() => Object.values(charts).forEach(c => c.resize()), 50);
+  }});
+}});
+
+renderT2Funnel();
+renderT2Ranking();
 
 // ──────────────────────────────────────────────────────────────────────────
 // LLM 意向真伪分析

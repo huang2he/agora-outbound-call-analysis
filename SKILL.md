@@ -141,6 +141,36 @@ xlsx 列：Call ID / Agent ID / Agent Name / Duration / Hangup Reason / Max turn
 
 漏斗是并列分支（完整转换 + 意向客户），不是严格上下层级——这点在 dashboard 的「口径定义」横条里也明示了，避免用户误读 Funnel chart 的内置百分比。
 
+## Tab 2 · Agent 视角 KDA 面板 (2026-05-18 新增)
+
+Dashboard 顶部加了「产品总览 / Agent 视角 (KDA)」两个 tab。Tab 2 把 agent 当销售员管，按 Agent Name 评估 4 关闯关能力，6 维度雷达图：
+
+| 关 | 通关条件（Structured Output 字段） |
+|---|---|
+| 第 1 关 车型 | `购车品牌` **AND** `购车型号` 都非空（**与 Tab 1 的"完整转换"用 OR 不同**）|
+| 第 2 关 城市 | `购车城市` 非空 |
+| 第 3 关 时间 | `购车时间` 非空 |
+| 第 4 关 姓氏 | `购车姓名` 非空 |
+
+**严格线性递进**：过第 N 关 ⇔ 第 1..N 全过。
+
+6 维度（每个归一化 0-100）：
+
+| 维度 | 简称 | 计算口径 |
+|---|---|---|
+| 全关通过率 | 击穿率 | `n_full / n_human` × 100 |
+| 路径长度 | 轮效 | 全过通话的平均 `max(turn_id)`，5 轮=100 分，15 轮=0 |
+| 早期击中 | 首杀 | T1 (车型关首次命中 turn) × 15 + T2 (城市关) × 8。v0 用关键词正则，v1 上 LLM |
+| 闯关费劲 | 滑顺 | assistant 重复问同一关 → friction +1，每关一次封顶。`100 − Σ friction × 20` |
+| 关卡均衡 | 不偏科 | 4 关各自通过率的方差 × 1000，反向 |
+| 早挂断免疫 | 抗挂 | `(1 - 早挂断率) × 100`，早挂断 = assistant 轮数 ≤ 3 |
+
+综合分加权：击穿率 0.3 + 轮效 0.2 + 首杀 0.15 + 滑顺 0.15 + 不偏科 0.1 + 抗挂 0.1。
+
+**口径独立性**：Tab 2 的"4 关"和 Tab 1 的"完整转换/带车型完整转换"**故意不同**——Tab 2 是给销售员（agent）打分用的更严口径（车型 AND），Tab 1 是面向 4S 店转化率的并列分支（车型 OR）。两者数字预期会有差，**不要互相对齐**。
+
+详细数据来源 → [METRICS.md](./METRICS.md)。设计依据 → 见 [Agent-视角指标设计](https://github.com/huang2he/agora-outbound-call-analysis/blob/main/docs/AGENT_KDA_DESIGN.md)（如已拷贝）。
+
 ## 多个文件并行分析
 
 每次跑 `run.sh <file>` 都是**独立 Python 进程，独立端口，独立 DataFrame**。所以一次会话里用户连续让你分析 A.xlsx 然后 B.xlsx 时：
