@@ -755,7 +755,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="tab-agent" class="tab-content">
 
   <div class="defs">
-    Tab 2 只看 <b>有效会话</b>：真人接听 (USER/AI_HANGUP) 且至少 1 句"真实"用户发言（排除首句挂断 + 系统静默兜底 + IVR 语音信箱）。
+    Tab 2 只看 <b>有效会话</b>：真人接听 (USER/AI_HANGUP) <b>且至少 1 句"真实"用户发言</b>。
+    三级筛子：① 剔除<b>首句挂断</b>（agent 一开口就被挂）② 剔除<b>接通无应答</b>（客户全程未开口，agent 自言自语到挂断）③ 剩下是有效会话。
     4 关 = <code>车型 (品牌 AND 型号)</code> · <code>城市</code> · <code>时间</code> · <code>姓氏</code>，严格线性。
   </div>
 
@@ -765,7 +766,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <h2>1 · 数据范围漏斗</h2>
-  <p class="section-note">从真人接听 → 剥离首句挂断 / 系统兜底 / IVR → 得到能评估 agent 的有效会话。</p>
+  <p class="section-note">从真人接听 → 剥离首句挂断 / 接通无应答 → 得到能评估 agent 的有效会话。"接通无应答" = 客户接了但全程一句话没说（系统注入 silence 占位让 agent 反复追问，最终 agent 自动挂）。</p>
   <div id="t2-scope-stats" class="stats"></div>
 
   <h2>2 · 4 关独立通过率 (有效会话内)</h2>
@@ -1767,7 +1768,7 @@ function renderT2Scope() {{
       <div class="pcts"><div><span class="lbl">/ 真人</span><span class="num">${{d.n_human ? (lostHangup / d.n_human * 100).toFixed(1) : 0}}%</span></div></div>
     </div>
     <div class="stat lost">
-      <div class="label">系统兜底/IVR 剔除</div>
+      <div class="label">接通无应答剔除</div>
       <div class="val">${{lostSilence}}</div>
       <div class="pcts"><div><span class="lbl">/ 真人</span><span class="num">${{d.n_human ? (lostSilence / d.n_human * 100).toFixed(1) : 0}}%</span></div></div>
     </div>
