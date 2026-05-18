@@ -254,10 +254,11 @@ def _bucket_breakdown(df: pd.DataFrame, label: str) -> dict:
     n_human = int(df["_human"].sum())
     valid = df[df["_valid"]].copy()
     n_valid = len(valid)
-    # 首句挂断 = 真人接听 且 assistant 轮 == 1
-    n_first_hangup = int((df["_human"] & (df["_assistant_turns"] <= 1)).sum())
-    # 系统兜底/IVR 主导 = 真人接听 但 _real_user_turns == 0 且不是首句挂断
-    n_silence_or_ivr = int((df["_human"] & (df["_real_user_turns"] == 0) & (df["_assistant_turns"] > 1)).sum())
+    # 客户全程未开口 = 真人接听 AND 真实 user turn 数 == 0
+    # 互斥拆成 2 个子类，使 n_first_hangup + n_silence_or_ivr + n_valid = n_human
+    n_first_hangup   = int((df["_human"] & (df["_real_user_turns"] == 0) & (df["_assistant_turns"] == 1)).sum())
+    n_silence_or_ivr = int((df["_human"] & (df["_real_user_turns"] == 0) & (df["_assistant_turns"]  > 1)).sum())
+    n_silent_total   = n_first_hangup + n_silence_or_ivr
 
     # 4 关各自独立通过率（在有效会话内）
     slot_pass = {name: 0 for name in LEVEL_NAMES}
@@ -307,6 +308,7 @@ def _bucket_breakdown(df: pd.DataFrame, label: str) -> dict:
         "n_valid": n_valid,
         "n_first_hangup": n_first_hangup,
         "n_silence_or_ivr": n_silence_or_ivr,
+        "n_silent_total": n_silent_total,
         "valid_rate_of_human": round(n_valid / n_human * 100, 1) if n_human else 0.0,
         "slot_pass_in_valid": slot_pass,
         "buckets": buckets,

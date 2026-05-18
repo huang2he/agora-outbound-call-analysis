@@ -765,9 +765,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <select id="t2-agent-select" style="font: inherit; font-size: 13px; padding: 5px 26px 5px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel); color: var(--text); min-width: 280px;"></select>
   </div>
 
-  <h2>1 · 数据范围漏斗</h2>
-  <p class="section-note">从真人接听 → 剥离首句挂断 / 接通无应答 → 得到能评估 agent 的有效会话。"接通无应答" = 客户接了但全程一句话没说（系统注入 silence 占位让 agent 反复追问，最终 agent 自动挂）。</p>
-  <div id="t2-scope-stats" class="stats"></div>
+  <h2>1 · 数据范围分流 (桑基图)</h2>
+  <p class="section-note">
+    <b>有效会话</b> = 真人接听 (Hangup ∈ USER/AI_HANGUP) <b>且</b> 至少 1 句"真实用户发言"。
+    "真实用户发言" = role=user 的 turn，且 <code>metadata.source ≠ silence</code>（不是系统注入的静默占位）、content 非空、不含 IVR 语音信箱关键词（"请留下你的姓名"/"智语音留言"/"帮你确认此人" 等）。
+    剩下两类是<b>客户全程未开口</b>的通话：<b>首句挂断</b>（agent 说 1 句开场白客户没回）+ <b>接通无应答</b>（agent 反复追问客户始终不说话）。
+  </p>
+  <div class="card"><div id="t2-chart-sankey" class="chart" style="height: 360px;"></div></div>
 
   <h2>2 · 4 关独立通过率 (有效会话内)</h2>
   <p class="section-note">每关独立看，不要求线性。说明 agent 收哪个槽位最弱。</p>
@@ -924,6 +928,7 @@ const chartIds = ['chart-funnel',
                   'chart-turn-intent','chart-turn-intent-donut',
                   'chart-duration', 'chart-first-sentence-dur',
                   'chart-field-count', 'chart-field-count-donut',
+                  't2-chart-sankey',
                   't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
@@ -1751,34 +1756,78 @@ function renderT2AgentSelect() {{
 }}
 
 function renderT2Scope() {{
+  // 桑基图：真人接听 → {{客户全程未开口, 有效会话}} → {{首句挂断, 接通无应答, 0/1/2/3/4 关}}
   const d = t2CurrentData();
   if (!d) return;
-  const lostHangup = d.n_first_hangup;
-  const lostSilence = d.n_silence_or_ivr;
-  const validRate = d.n_human ? (d.n_valid / d.n_human * 100).toFixed(1) : '0';
-  const html = `
-    <div class="stat">
-      <div class="label">真人接听</div>
-      <div class="val">${{d.n_human}}</div>
-      <div class="pcts"><div><span class="lbl">/ 总通话</span><span class="num">${{d.n_total ? (d.n_human / d.n_total * 100).toFixed(1) : 0}}%</span></div></div>
-    </div>
-    <div class="stat lost">
-      <div class="label">首句挂断剔除</div>
-      <div class="val">${{lostHangup}}</div>
-      <div class="pcts"><div><span class="lbl">/ 真人</span><span class="num">${{d.n_human ? (lostHangup / d.n_human * 100).toFixed(1) : 0}}%</span></div></div>
-    </div>
-    <div class="stat lost">
-      <div class="label">接通无应答剔除</div>
-      <div class="val">${{lostSilence}}</div>
-      <div class="pcts"><div><span class="lbl">/ 真人</span><span class="num">${{d.n_human ? (lostSilence / d.n_human * 100).toFixed(1) : 0}}%</span></div></div>
-    </div>
-    <div class="stat valid">
-      <div class="label">有效会话</div>
-      <div class="val">${{d.n_valid}}</div>
-      <div class="pcts"><div><span class="lbl">/ 真人</span><span class="num">${{validRate}}%</span></div></div>
-    </div>
-  `;
-  document.getElementById('t2-scope-stats').innerHTML = html;
+
+  // 节点定义
+  const nodes = [
+    {{ name: `真人接听\\n${{d.n_human}}` }},
+    {{ name: `客户未开口\\n${{d.n_silent_total}}` }},
+    {{ name: `有效会话\\n${{d.n_valid}}` }},
+    {{ name: `首句挂断\\n${{d.n_first_hangup}}` }},
+    {{ name: `接通无应答\\n${{d.n_silence_or_ivr}}` }},
+  ];
+  const links = [
+    {{ source: `真人接听\\n${{d.n_human}}`,    target: `客户未开口\\n${{d.n_silent_total}}`, value: d.n_silent_total }},
+    {{ source: `真人接听\\n${{d.n_human}}`,    target: `有效会话\\n${{d.n_valid}}`,         value: d.n_valid }},
+    {{ source: `客户未开口\\n${{d.n_silent_total}}`, target: `首句挂断\\n${{d.n_first_hangup}}`,   value: d.n_first_hangup }},
+    {{ source: `客户未开口\\n${{d.n_silent_total}}`, target: `接通无应答\\n${{d.n_silence_or_ivr}}`, value: d.n_silence_or_ivr }},
+  ];
+  // 有效会话 → 5 个通关分桶
+  d.buckets.forEach(b => {{
+    const lvName = b.level === 0 ? '0 关 (一关没过)' : `${{b.level}} 关`;
+    nodes.push({{ name: `${{lvName}}\\n${{b.count}}` }});
+    links.push({{ source: `有效会话\\n${{d.n_valid}}`, target: `${{lvName}}\\n${{b.count}}`, value: b.count }});
+  }});
+
+  // 过滤掉 value=0 的 link，否则 ECharts 会画细线噪点
+  const linksFiltered = links.filter(l => l.value > 0);
+  const usedNodes = new Set(linksFiltered.flatMap(l => [l.source, l.target]));
+  const nodesFiltered = nodes.filter(n => usedNodes.has(n.name));
+
+  // 配色（按业务语义）
+  const colorMap = {{}};
+  nodesFiltered.forEach(n => {{
+    if (n.name.startsWith('真人接听'))     colorMap[n.name] = '#2563eb';
+    else if (n.name.startsWith('客户未开口')) colorMap[n.name] = '#f43f5e';
+    else if (n.name.startsWith('有效会话')) colorMap[n.name] = '#10b981';
+    else if (n.name.startsWith('首句挂断'))  colorMap[n.name] = '#f43f5e';
+    else if (n.name.startsWith('接通无应答'))colorMap[n.name] = '#fb923c';
+    else if (n.name.startsWith('0 关'))     colorMap[n.name] = '#94a3b8';
+    else if (n.name.startsWith('1 关'))     colorMap[n.name] = '#f59e0b';
+    else if (n.name.startsWith('2 关'))     colorMap[n.name] = '#eab308';
+    else if (n.name.startsWith('3 关'))     colorMap[n.name] = '#06b6d4';
+    else if (n.name.startsWith('4 关'))     colorMap[n.name] = '#10b981';
+  }});
+
+  charts['t2-chart-sankey'].setOption({{
+    tooltip: tooltipBase({{
+      trigger: 'item',
+      formatter: p => {{
+        if (p.dataType === 'edge') {{
+          const sName = p.data.source.split('\\n')[0];
+          const tName = p.data.target.split('\\n')[0];
+          const total = d.n_human || 1;
+          return `<b>${{sName}} → ${{tName}}</b><br>${{p.data.value}} 通 · ${{(p.data.value / total * 100).toFixed(1)}}% / 真人接听`;
+        }}
+        const parts = p.name.split('\\n');
+        return `<b>${{parts[0]}}</b><br>${{parts[1] || ''}} 通`;
+      }},
+    }}),
+    series: [{{
+      type: 'sankey',
+      data: nodesFiltered.map(n => ({{ ...n, itemStyle: {{ color: colorMap[n.name] || '#94a3b8' }} }})),
+      links: linksFiltered,
+      nodeAlign: 'left',
+      nodeWidth: 18,
+      nodeGap: 12,
+      left: '4%', right: '14%', top: '4%', bottom: '4%',
+      label: {{ color: TEXT, fontSize: 11, fontWeight: 500 }},
+      lineStyle: {{ curveness: 0.5, color: 'gradient', opacity: 0.55 }},
+      emphasis: {{ focus: 'adjacency', lineStyle: {{ opacity: 0.8 }} }},
+    }}],
+  }}, true);
 }}
 
 function renderT2SlotBars() {{
