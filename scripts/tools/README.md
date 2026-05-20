@@ -49,11 +49,25 @@ UTC (ISO Z) 格式，脚本自动换算 (+8 小时)。
 --agent lxc                       Agent Name 包含关键字 (大小写不敏感)
 --campaign "外呼测试"             Campaign Name 包含关键字
 --hangup USER_HANGUP,AI_HANGUP    Hangup Reason 白名单
+--allow-empty-transcript          允许 Transcript 为空的行 (默认剔除)
+--allow-empty-recording           允许 Audio Record URL 为空的行 (默认剔除)
 --drop-so-field 购车省份          Structured Output 里要剔除的字段 (可多次)
 --keep-all-so                     关闭剔除, 保留原始 Structured Output
 -o output.csv                     显式指定输出路径 (默认自动取名)
 --dry-run                         只打印筛选后行数和分布, 不写文件
 --show-times                      额外打印筛选后实际的 BJT 起止时间
+```
+
+### 空 Transcript / 录音剔除 (默认开启)
+
+研发原始导出里有一类"接通但没产生对话"的占位行：`Transcript` 列是空或
+`"[]"`、`Audio Record File Download URL` 也是空。这些行喂给 dashboard 不会
+报错，但占位置且评估 agent 没意义。
+
+filter 默认剔除这两列任一为空的行。如果你想保留:
+
+```bash
+filter.sh raw.csv --bjt "..." --allow-empty-transcript --allow-empty-recording
 ```
 
 ### Structured Output 字段清洗 (默认开启)

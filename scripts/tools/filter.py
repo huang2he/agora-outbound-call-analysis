@@ -136,6 +136,10 @@ def main() -> int:
     p.add_argument("--agent", help="Agent Name 必须包含的关键字 (大小写不敏感)")
     p.add_argument("--campaign", help="Campaign Name 必须包含的关键字")
     p.add_argument("--hangup", help='Hangup Reason 白名单, 逗号分隔. 例: "USER_HANGUP,AI_HANGUP"')
+    p.add_argument("--allow-empty-transcript", action="store_true",
+                   help="允许 Transcript 为空 / '[]' 的行 (默认剔除)")
+    p.add_argument("--allow-empty-recording", action="store_true",
+                   help="允许 Audio Record File Download URL 为空的行 (默认剔除)")
     p.add_argument("--drop-so-field", action="append", default=None,
                    help='Structured Output JSON 里要剔除的字段, 可多次指定. '
                         f'默认去掉: {SO_DROP_FIELDS_DEFAULT}. 用 "--keep-all-so" 关闭剔除.')
@@ -188,6 +192,22 @@ def main() -> int:
         hangs = [x.strip() for x in args.hangup.split(",")]
         mask &= df["Hangup Reason"].isin(hangs)
         print(f"  Hangup Reason ∈ {hangs}", file=sys.stderr)
+
+    # 默认剔除 Transcript / Audio URL 为空的行 (没法评估 agent / 没法听录音)
+    if not args.allow_empty_transcript and "Transcript" in df.columns:
+        t = df["Transcript"].fillna("").astype(str).str.strip()
+        has_tr = ~(t.isin(["", "[]", "null"]))
+        n_drop = (mask & ~has_tr).sum()
+        mask &= has_tr
+        if n_drop:
+            print(f"  剔除 Transcript 为空 {n_drop} 行", file=sys.stderr)
+    if not args.allow_empty_recording and "Audio Record File Download URL" in df.columns:
+        a = df["Audio Record File Download URL"].fillna("").astype(str).str.strip()
+        has_rec = a != ""
+        n_drop = (mask & ~has_rec).sum()
+        mask &= has_rec
+        if n_drop:
+            print(f"  剔除 录音 URL 为空 {n_drop} 行", file=sys.stderr)
 
     out = df[mask].drop(columns=["_ts_bjt"])
     n_out = len(out)
