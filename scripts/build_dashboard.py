@@ -902,7 +902,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="t2-chart-fail-cat" class="chart" style="height: 320px;"></div>
   </div>
 
-  <h2>6 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
+  <h2>6 · 客户态度反转 (LLM 判定)</h2>
+  <p class="section-note">
+    比较客户在通话开局 vs 结尾的态度. 三类信号:<br>
+    🟢 <b>挽留成功</b>: 消极/中性开局 → 积极/中性结尾 (agent 把客户聊回来了)<br>
+    🔴 <b>聊跑</b>: 积极/中性开局 → 消极结尾 (agent 主动失败, 把好客户搞砸)<br>
+    ⚪ <b>无反转</b>: 态度不变 (态度稳定)
+  </p>
+  <div class="t2-grid">
+    <div class="card">
+      <h3 class="t2-card-title">态度变化矩阵 <span style="font-weight:400;color:var(--muted);font-size:11px;">· start × end</span></h3>
+      <div id="t2-chart-sentiment-matrix" class="chart" style="height: 300px;"></div>
+    </div>
+    <div class="card">
+      <h3 class="t2-card-title">关键案例 <span style="font-weight:400;color:var(--muted);font-size:11px;">· 聊跑 / 挽留 各 5 通</span></h3>
+      <div id="t2-sentiment-cases" style="max-height: 320px; overflow-y: auto; font-size: 12px;"></div>
+    </div>
+  </div>
+
+  <h2>7 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
   <p class="section-note">
     每行 = 一个失败通话。表格直接显示 Call ID 和 LLM 给的全部判定。
     点击 <b>展开按钮</b> 看完整 transcript。
@@ -1033,7 +1051,8 @@ const chartIds = ['chart-funnel',
                   'chart-field-count', 'chart-field-count-donut',
                   't2-chart-sankey',
                   't2-chart-waste', 't2-chart-firstword',
-                  't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat'];
+                  't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat',
+                  't2-chart-sentiment-matrix'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
 
@@ -2495,6 +2514,128 @@ function renderT2LlmCharts() {{
   ].join('');
   if ([...catSet].includes(curCat)) catSel.value = curCat;
   renderT2CasesTable();
+  renderT2SentimentReversal(ok);
+}}
+
+function renderT2SentimentReversal(ok) {{
+  // 拿到所有有 sentiment 字段的结果
+  const withSent = ok.filter(r => r.user_sentiment_start && r.user_sentiment_end);
+  if (!withSent.length) {{
+    charts['t2-chart-sentiment-matrix'].clear();
+    charts['t2-chart-sentiment-matrix'].setOption({{
+      title: {{
+        text: 'LLM 尚未产出 sentiment 字段',
+        subtext: '说明这批结果是旧 schema 跑的, 重启服务后再试',
+        left: 'center', top: 'middle',
+        textStyle: {{ color: MUTED, fontSize: 13 }},
+        subtextStyle: {{ color: MUTED, fontSize: 11 }},
+      }},
+    }});
+    document.getElementById('t2-sentiment-cases').innerHTML =
+      '<div style="color:var(--muted); padding: 12px;">无 sentiment 数据</div>';
+    return;
+  }}
+
+  // 3×3 矩阵: start (积极/中性/消极) × end (同)
+  const cats = ['积极', '中性', '消极'];
+  const matrix = {{}};   // matrix[start][end] = count
+  cats.forEach(s => {{ matrix[s] = {{}}; cats.forEach(e => matrix[s][e] = 0); }});
+  withSent.forEach(r => {{
+    if (matrix[r.user_sentiment_start] && matrix[r.user_sentiment_start][r.user_sentiment_end] !== undefined) {{
+      matrix[r.user_sentiment_start][r.user_sentiment_end] += 1;
+    }}
+  }});
+
+  // heatmap 数据: [x_idx, y_idx, value]
+  const heatData = [];
+  cats.forEach((s, si) => cats.forEach((e, ei) => {{
+    heatData.push([ei, si, matrix[s][e]]);
+  }}));
+  const maxVal = Math.max(...heatData.map(d => d[2]), 1);
+
+  // 单元格颜色语义
+  const cellColor = (s, e) => {{
+    if (s === e) return '#94a3b8';  // 不变 — 灰
+    if (s === '消极' && (e === '中性' || e === '积极')) return '#10b981';  // 挽留
+    if (s === '中性' && e === '积极') return '#10b981';
+    if (s === '积极' && (e === '消极' || e === '中性')) return '#f43f5e';  // 聊跑
+    if (s === '中性' && e === '消极') return '#f43f5e';
+    return '#94a3b8';
+  }};
+
+  charts['t2-chart-sentiment-matrix'].setOption({{
+    tooltip: tooltipBase({{
+      position: 'top',
+      formatter: p => {{
+        const [ei, si, v] = p.data;
+        const tag = (cats[si] === cats[ei]) ? '⚪ 无反转'
+                  : ((cats[si] === '积极' && cats[ei] !== '积极') ||
+                     (cats[si] === '中性' && cats[ei] === '消极')) ? '🔴 聊跑'
+                  : '🟢 挽留';
+        return `${{cats[si]}} → ${{cats[ei]}}<br><b>${{v}}</b> 通 · ${{tag}}`;
+      }},
+    }}),
+    grid: {{ left: 70, right: 16, top: 30, bottom: 50 }},
+    xAxis: {{
+      type: 'category', data: cats, name: '结尾态度', nameLocation: 'middle', nameGap: 28,
+      axisLabel: {{ color: TEXT, fontSize: 12 }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitLine: {{ show: false }},
+    }},
+    yAxis: {{
+      type: 'category', data: cats, name: '开局态度', nameLocation: 'middle', nameGap: 50,
+      axisLabel: {{ color: TEXT, fontSize: 12 }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitLine: {{ show: false }},
+    }},
+    visualMap: {{ show: false, min: 0, max: maxVal }},
+    series: [{{
+      type: 'heatmap',
+      data: heatData.map(d => ({{
+        value: d,
+        itemStyle: {{
+          color: cellColor(cats[d[1]], cats[d[0]]),
+          opacity: 0.3 + 0.7 * (d[2] / maxVal),
+        }},
+      }})),
+      label: {{
+        show: true, color: '#fff', fontSize: 14, fontWeight: 600,
+        formatter: p => p.value[2] > 0 ? p.value[2] : '',
+      }},
+    }}],
+  }}, true);
+
+  // 关键案例: 5 个聊跑 + 5 个挽留
+  const isRanAway = r => (r.user_sentiment_start === '积极' && r.user_sentiment_end !== '积极') ||
+                          (r.user_sentiment_start === '中性' && r.user_sentiment_end === '消极');
+  const isRescued = r => (r.user_sentiment_start === '消极' && r.user_sentiment_end !== '消极') ||
+                          (r.user_sentiment_start === '中性' && r.user_sentiment_end === '积极');
+  const ranAway = withSent.filter(isRanAway).slice(0, 5);
+  const rescued = withSent.filter(isRescued).slice(0, 5);
+
+  const caseRow = (r, tag, color) => `
+    <div style="border-left: 3px solid ${{color}}; padding: 6px 10px; margin: 4px 0; background: var(--panel-2); border-radius: 0 4px 4px 0;">
+      <div style="font-size: 10px; color: ${{color}}; font-weight: 600; margin-bottom: 2px;">
+        ${{tag}} · ${{r.user_sentiment_start}} → ${{r.user_sentiment_end}} · pass=${{r.pass_n}}
+      </div>
+      <code style="font-size: 10px; background: white; padding: 1px 4px; border-radius: 2px;">${{(r.call_id||'').slice(-10)}}</code>
+      <div style="margin-top: 4px; color: var(--text);">${{escapeHtml(r.fail_reason || '')}}</div>
+      <div style="font-size: 11px; color: var(--muted); margin-top: 2px;">"${{escapeHtml(r.user_detect_signal || '')}}"</div>
+    </div>
+  `;
+  let html = '';
+  if (ranAway.length) {{
+    html += '<div style="font-size: 11px; color: #b91c1c; font-weight: 600; margin: 6px 0 4px;">🔴 把客户聊跑了 (积极/中性 → 消极)</div>';
+    html += ranAway.map(r => caseRow(r, '聊跑', '#f43f5e')).join('');
+  }}
+  if (rescued.length) {{
+    html += '<div style="font-size: 11px; color: #047857; font-weight: 600; margin: 12px 0 4px;">🟢 挽留成功 (消极/中性 → 积极)</div>';
+    html += rescued.map(r => caseRow(r, '挽留', '#10b981')).join('');
+  }}
+  if (!html) html = '<div style="color:var(--muted); padding: 12px;">本批无明显态度反转案例</div>';
+  document.getElementById('t2-sentiment-cases').innerHTML = html;
 }}
 
 let t2CasesAllOk = [];        // 当前 scope 下的所有 LLM ok 结果

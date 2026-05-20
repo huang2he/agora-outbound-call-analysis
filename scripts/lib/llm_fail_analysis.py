@@ -106,12 +106,19 @@ SYSTEM_PROMPT = """你是一个外呼销售质检专家，专门评估 AI 外呼
   "fail_reason": "<≤30 字, 描述 agent 出了什么问题>",
   "fail_category": "<其中之一: 开场太突兀 | 话术机械重复 | 没接客户上文 | 误判客户意图 | 提问跳跃 | 信息收集不彻底 | 客户主动拒绝 | 其他>",
   "user_detect_turn": <int 或 null, 客户在哪个 user turn 开始反感/识破>,
-  "user_detect_signal": "<≤50 字, 客户原话或行为>"
+  "user_detect_signal": "<≤50 字, 客户原话或行为>",
+  "user_sentiment_start": "<客户开局态度: 积极 | 中性 | 消极>",
+  "user_sentiment_end":   "<客户结尾态度: 积极 | 中性 | 消极>"
 }
 
 注意:
 - fail_turn 是 assistant 的第几次发言（不是 transcript 的 turn_id），从 1 开始数
 - 如果 agent 没明显失败、纯粹客户态度问题，fail_turn 可填 1，fail_category 选"客户主动拒绝"
+- user_sentiment 判定:
+  · "积极" = 主动给信息 / 主动询问 / 配合度高
+  · "中性" = 嗯哦敷衍 / 提问澄清 / 态度模糊
+  · "消极" = 抗拒 / 反讽 / 骂人 / 多次拒绝
+- 关注客户开局 (前 1-2 个 user turn) 和结尾 (最后 1-2 个 user turn) 的态度对比
 - 必须返回上面所有字段，不要加任何 markdown 围栏。
 """
 
