@@ -67,9 +67,11 @@ DASHSCOPE_API_KEY = ENV.get("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DASHSCOPE_MODEL = ENV.get("LLM_MODEL", "qwen3.6-plus")
 
-# 并发：反代可能有 rate limit，保守起步
-LLM_WORKERS = 8
+# 并发：反代 gpt-5.4 在 8 并发下大量 503/429, 降到 4
+LLM_WORKERS = 4
 LLM_TIMEOUT_S = 90
+LLM_MAX_RETRIES = 4         # 总尝试次数 (含首次)
+LLM_RETRY_BACKOFF_S = [2, 5, 12, 25]  # 每次重试前的等待秒数
 
 
 def active_backend() -> tuple[str, str, str, str] | None:
@@ -162,6 +164,7 @@ def format_transcript(transcript: list[dict], max_chars: int = 3500) -> str:
 # ─────────────────────── LLM 调用 ────────────────────────
 
 def _call_llm(messages: list[dict]) -> dict:
+    """重试 LLM_MAX_RETRIES 次 (主要扛反代的 429 / 503)."""
     backend = active_backend()
     if not backend:
         return {"error": "no LLM backend configured (set OPENAI_API_KEY or DASHSCOPE_API_KEY)"}
@@ -172,39 +175,53 @@ def _call_llm(messages: list[dict]) -> dict:
         "messages": messages,
         "response_format": {"type": "json_object"},
     }
-    # gpt-5 / o1 系列不接受 temperature；qwen 接受。统一不传 temperature 兼容两边。
+    url = (f"{base_url}/v1/chat/completions" if not base_url.endswith("/v1")
+           else f"{base_url}/chat/completions")
 
-    req = urllib.request.Request(
-        f"{base_url}/v1/chat/completions" if not base_url.endswith("/v1")
-        else f"{base_url}/chat/completions",
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        content = payload["choices"][0]["message"]["content"]
-        # 去掉可能的 ```json fence
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1] if "\n" in content else content
-            if content.endswith("```"):
-                content = content.rsplit("```", 1)[0]
-        return json.loads(content)
-    except urllib.error.HTTPError as e:
+    last_err = ""
+    for attempt in range(LLM_MAX_RETRIES):
+        req = urllib.request.Request(
+            url, method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        )
         try:
-            err_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            err_body = ""
-        return {"error": f"HTTP {e.code}: {err_body[:300]}"}
-    except json.JSONDecodeError as e:
-        return {"error": f"非 JSON 输出: {str(e)[:200]}"}
-    except Exception as e:  # noqa: BLE001
-        return {"error": str(e)[:300]}
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            content = payload["choices"][0]["message"]["content"]
+            content = content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1] if "\n" in content else content
+                if content.endswith("```"):
+                    content = content.rsplit("```", 1)[0]
+            return json.loads(content)
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = ""
+            last_err = f"HTTP {e.code}: {err_body[:200]}"
+            # 503 / 429 是反代瞬时不可用 → 等一下重试. 4xx (除 429) 一般是 prompt 问题不重试.
+            retriable = e.code in (429, 500, 502, 503, 504)
+            if not retriable or attempt >= LLM_MAX_RETRIES - 1:
+                return {"error": last_err}
+            wait = LLM_RETRY_BACKOFF_S[min(attempt, len(LLM_RETRY_BACKOFF_S) - 1)]
+            time.sleep(wait)
+        except json.JSONDecodeError as e:
+            return {"error": f"非 JSON 输出: {str(e)[:200]}"}
+        except (urllib.error.URLError, TimeoutError) as e:
+            # 网络瞬断 / timeout 也重试
+            last_err = f"network: {str(e)[:200]}"
+            if attempt >= LLM_MAX_RETRIES - 1:
+                return {"error": last_err}
+            wait = LLM_RETRY_BACKOFF_S[min(attempt, len(LLM_RETRY_BACKOFF_S) - 1)]
+            time.sleep(wait)
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)[:300]}
+    return {"error": last_err or "exhausted retries"}
 
 
 def analyze_call(call: dict) -> dict:
