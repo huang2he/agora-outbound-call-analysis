@@ -671,6 +671,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .t2-case-line.agent {{ color: #1e3a8a; }}
   .t2-case-line.user  {{ color: #047857; }}
 
+  /* LLM 失败案例表格 */
+  .t2-cases-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+  .t2-cases-table th {{ background: var(--panel-2); color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 1; }}
+  .t2-cases-table td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }}
+  .t2-cases-table tr:hover td {{ background: rgba(37,99,235,0.03); }}
+  .t2-cases-table tr.expanded {{ background: rgba(37,99,235,0.05); }}
+  .t2-cases-table tr.expanded + tr.case-detail {{ background: var(--panel-2); }}
+  .t2-cases-table .col-id {{ width: 100px; }}
+  .t2-cases-table .col-id code {{ background: var(--panel-2); padding: 2px 6px; border-radius: 3px; font-size: 10px; font-family: monospace; cursor: pointer; }}
+  .t2-cases-table .col-id code:hover {{ background: rgba(37,99,235,0.15); }}
+  .t2-cases-table .col-agent {{ max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }}
+  .t2-cases-table .col-pn   {{ width: 56px; text-align: center; }}
+  .t2-cases-table .col-pn .chip {{ display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }}
+  .t2-cases-table .col-ft   {{ width: 56px; text-align: center; color: #b91c1c; font-weight: 600; }}
+  .t2-cases-table .col-cat  {{ width: 130px; }}
+  .t2-cases-table .col-cat .chip {{ display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 10px; background: rgba(244,63,94,0.10); color: #b91c1c; }}
+  .t2-cases-table .col-reason {{ color: var(--text); }}
+  .t2-cases-table .col-ut   {{ width: 56px; text-align: center; color: #b45309; font-weight: 600; }}
+  .t2-cases-table .col-signal {{ color: var(--muted); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .t2-cases-table .col-toggle {{ width: 32px; text-align: center; }}
+  .t2-cases-table .col-toggle button {{ background: none; border: 1px solid var(--border); color: var(--muted); width: 22px; height: 22px; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 0; }}
+  .t2-cases-table .col-toggle button:hover {{ border-color: var(--accent); color: var(--accent); }}
+  .t2-cases-table tr.case-detail td {{ padding: 0; }}
+  .t2-cases-table tr.case-detail .detail-box {{ padding: 12px 16px; background: var(--panel-2); border-left: 3px solid var(--accent); margin: 0 0 8px; }}
+  .pn-chip-0 {{ background: rgba(244,63,94,0.15); color: #b91c1c; }}
+  .pn-chip-1 {{ background: rgba(245,158,11,0.18); color: #b45309; }}
+  .pn-chip-2 {{ background: rgba(234,179,8,0.18);  color: #92400e; }}
+  .pn-chip-3 {{ background: rgba(6,182,212,0.15);  color: #0e7490; }}
+
   /* 0 关原因分布柱 */
   .t2-reason-row {{ display: grid; grid-template-columns: 110px 1fr 70px; gap: 10px; align-items: center; padding: 4px 0; font-size: 12px; }}
   .t2-reason-row .label {{ color: var(--text); }}
@@ -846,16 +875,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="t2-grid">
-    <div class="card">
-      <h3 class="t2-card-title">失败类别分布</h3>
-      <div id="t2-chart-fail-cat" class="chart" style="height: 280px;"></div>
+  <div class="card">
+    <h3 class="t2-card-title">失败类别分布</h3>
+    <div id="t2-chart-fail-cat" class="chart" style="height: 320px;"></div>
+  </div>
+
+  <h2>5 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
+  <p class="section-note">
+    每行 = 一个失败通话。表格直接显示 Call ID 和 LLM 给的全部判定。
+    点击 <b>展开按钮</b> 看完整 transcript。
+    顶部可按 agent / 桶 / 失败类别筛选。
+  </p>
+  <div class="card" id="t2-cases-card">
+    <div class="t2-cases-filters" style="display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; align-items: center;">
+      <label style="font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;">桶：</label>
+      <select id="t2-cases-filter-pn" style="font: inherit; font-size: 12px; padding: 4px 22px 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel);">
+        <option value="">全部</option>
+        <option value="0">0 关</option><option value="1">1 关</option>
+        <option value="2">2 关</option><option value="3">3 关</option>
+      </select>
+      <label style="font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;">类别：</label>
+      <select id="t2-cases-filter-cat" style="font: inherit; font-size: 12px; padding: 4px 22px 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); min-width: 150px;">
+        <option value="">全部</option>
+      </select>
+      <label style="font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;">每页：</label>
+      <select id="t2-cases-page-size" style="font: inherit; font-size: 12px; padding: 4px 22px 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel);">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="9999">全部</option>
+      </select>
+      <span id="t2-cases-count" style="margin-left: auto; font-size: 11px; color: var(--muted);"></span>
     </div>
-    <div class="card">
-      <h3 class="t2-card-title">典型失败案例 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 11px;"></span></h3>
-      <p class="section-note">按 pass_n 排序，点 Call ID 展开 LLM 给出的 reason + 证据。</p>
-      <div id="t2-cases-list" style="max-height: 360px; overflow-y: auto;"></div>
-    </div>
+    <div id="t2-cases-table-wrap"></div>
   </div>
 
 </div><!-- /tab-agent -->
@@ -2094,7 +2146,7 @@ function renderT2BucketCases(bucket) {{
     const llmHint = llm && !llm.error
       ? `<div style="font-size:11px; color:var(--muted); padding:6px 8px; background:var(--panel-2); border-radius:4px; margin-top:6px;">
           <b style="color:#b91c1c;">LLM 失败类别:</b> ${{escapeHtml(llm.fail_category || '?')}} · <b>原因:</b> ${{escapeHtml(llm.fail_reason || '-')}}<br>
-          <b>建议:</b> ${{escapeHtml(llm.suggestion || '-')}}
+          <b>客户识破:</b> U${{llm.user_detect_turn || '?'}} · ${{escapeHtml(llm.user_detect_signal || '-')}}
         </div>` : '';
 
     return `<details style="border-top: 1px solid var(--border); padding: 6px 8px;">
@@ -2195,8 +2247,10 @@ function renderT2LlmCharts() {{
   const ok = results.filter(r => !r.error);
   if (!ok.length) {{
     ['t2-chart-fail-turn','t2-chart-detect-turn','t2-chart-fail-cat'].forEach(id => charts[id].clear());
-    document.getElementById('t2-cases-list').innerHTML = '<div style="color:var(--muted); padding: 12px; font-size: 12px;">尚无 LLM 分析结果。</div>';
-    document.getElementById('t2-cases-meta').textContent = '';
+    const tw = document.getElementById('t2-cases-table-wrap');
+    if (tw) tw.innerHTML = '<div style="color:var(--muted); padding: 12px; font-size: 12px;">尚无 LLM 分析结果。</div>';
+    const m = document.getElementById('t2-cases-meta');
+    if (m) m.textContent = '';
     return;
   }}
 
@@ -2290,25 +2344,125 @@ function renderT2LlmCharts() {{
     }}],
   }}, true);
 
-  // 案例列表
-  document.getElementById('t2-cases-meta').textContent = `(n=${{ok.length}})`;
-  const cases = ok.slice().sort((a,b) => (b.pass_n||0) - (a.pass_n||0)).slice(0, 100);
-  document.getElementById('t2-cases-list').innerHTML = cases.map(r => {{
-    return `<details style="border-top: 1px solid var(--border); padding: 6px 8px;">
-      <summary style="cursor: pointer; font-size: 12px; display: flex; gap: 8px; align-items: center;">
-        <code style="background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 10px;">${{(r.call_id || '').slice(-8)}}</code>
-        <span style="color: var(--muted);">pass=${{r.pass_n}}</span>
-        <span style="color: #f43f5e; font-weight: 600;">A${{r.fail_turn || '?'}}</span>
-        <span style="background: rgba(244,63,94,0.10); color: #b91c1c; padding: 1px 6px; border-radius: 3px; font-size: 10px;">${{escapeHtml(r.fail_category || '-')}}</span>
-        <span style="color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${{escapeHtml(r.fail_reason || '-')}}</span>
-      </summary>
-      <div style="font-size: 11px; color: var(--muted); padding: 6px 8px; line-height: 1.5;">
-        <div><b>客户识破:</b> U${{r.user_detect_turn || '?'}} · ${{escapeHtml(r.user_detect_signal || '-')}}</div>
-        <div><b>建议:</b> ${{escapeHtml(r.suggestion || '-')}}</div>
-      </div>
-    </details>`;
-  }}).join('');
+  // 案例列表 (新版表格 + 筛选)
+  t2CasesAllOk = ok;
+  // 填充 category filter 下拉选项
+  const catSet = new Set(ok.map(r => r.fail_category).filter(Boolean));
+  const catSel = document.getElementById('t2-cases-filter-cat');
+  const curCat = catSel.value;
+  catSel.innerHTML = ['<option value="">全部</option>',
+    ...[...catSet].sort().map(c => `<option value="${{escapeHtml(c)}}">${{escapeHtml(c)}}</option>`)
+  ].join('');
+  if ([...catSet].includes(curCat)) catSel.value = curCat;
+  renderT2CasesTable();
 }}
+
+let t2CasesAllOk = [];        // 当前 scope 下的所有 LLM ok 结果
+const t2ExpandedCases = new Set();
+
+function renderT2CasesTable() {{
+  const pnVal = document.getElementById('t2-cases-filter-pn').value;
+  const catVal = document.getElementById('t2-cases-filter-cat').value;
+  const pageSize = parseInt(document.getElementById('t2-cases-page-size').value || '100', 10);
+
+  let cases = t2CasesAllOk.slice();
+  if (pnVal !== '') cases = cases.filter(r => String(r.pass_n) === pnVal);
+  if (catVal !== '') cases = cases.filter(r => r.fail_category === catVal);
+  cases.sort((a, b) => (b.pass_n||0) - (a.pass_n||0) || ((a.fail_turn||99) - (b.fail_turn||99)));
+
+  document.getElementById('t2-cases-count').textContent =
+    `${{cases.length}} 条 (筛选前 ${{t2CasesAllOk.length}})`;
+  const shown = cases.slice(0, pageSize);
+
+  // 行内 transcript 渲染（用 DATA.rows 反查）
+  const rowByCallId = new Map(DATA.rows.map(r => [r['Call ID'], r]));
+
+  const headerHtml = `<thead><tr>
+      <th class="col-toggle"></th>
+      <th class="col-id">Call ID</th>
+      <th class="col-agent">Agent</th>
+      <th class="col-pn">桶</th>
+      <th class="col-ft">A#</th>
+      <th class="col-cat">失败类别</th>
+      <th class="col-reason">失败原因 (≤30 字)</th>
+      <th class="col-ut">U#</th>
+      <th class="col-signal">客户识破证据</th>
+    </tr></thead>`;
+  const bodyHtml = shown.map((r, idx) => {{
+    const cid = r.call_id || '';
+    const expanded = t2ExpandedCases.has(cid);
+    const mainRow = `<tr data-cid="${{escapeHtml(cid)}}" class="${{expanded ? 'expanded' : ''}}">
+      <td class="col-toggle"><button class="t2-case-toggle">${{expanded ? '–' : '+'}}</button></td>
+      <td class="col-id"><code title="点击复制">${{escapeHtml(cid)}}</code></td>
+      <td class="col-agent" title="${{escapeHtml(r.agent_name || '')}}">${{escapeHtml(r.agent_name || '-')}}</td>
+      <td class="col-pn"><span class="chip pn-chip-${{r.pass_n}}">${{r.pass_n}} 关</span></td>
+      <td class="col-ft">A${{r.fail_turn || '?'}}</td>
+      <td class="col-cat"><span class="chip">${{escapeHtml(r.fail_category || '-')}}</span></td>
+      <td class="col-reason">${{escapeHtml(r.fail_reason || '-')}}</td>
+      <td class="col-ut">${{r.user_detect_turn ? 'U' + r.user_detect_turn : '-'}}</td>
+      <td class="col-signal" title="${{escapeHtml(r.user_detect_signal || '')}}">${{escapeHtml(r.user_detect_signal || '-')}}</td>
+    </tr>`;
+    if (!expanded) return mainRow;
+    // 展开行：transcript + LLM 详情
+    const src = rowByCallId.get(cid) || {{}};
+    const failTurnIdx = r.fail_turn ? parseInt(r.fail_turn, 10) : null;
+    const lines = (src['Transcript'] || '').split('\\n');
+    let aCount = 0;
+    const linesHtml = lines.map(line => {{
+      const isAgent = line.startsWith('assistant');
+      if (isAgent) aCount++;
+      const isFail = (isAgent && failTurnIdx && aCount === failTurnIdx);
+      const cls = isAgent ? 'agent' : 'user';
+      const style = isFail
+        ? 'background: rgba(244,63,94,0.12); color: #b91c1c; border-left: 3px solid #f43f5e; padding-left: 6px; font-weight: 600;'
+        : '';
+      const tag = isFail ? '  ⚠️ LLM 判此句出问题' : '';
+      return `<div class="t2-case-line ${{cls}}" style="${{style}}">${{escapeHtml(line)}}${{tag}}</div>`;
+    }}).join('');
+    const audio = src['Audio URL']
+      ? `<a href="${{escapeHtml(src['Audio URL'])}}" target="_blank" style="color: var(--accent); font-size: 11px;">▶ 听录音</a>` : '';
+    const detail = `<tr class="case-detail"><td colspan="9">
+      <div class="detail-box">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px;">
+          <b>时长</b> ${{src['Duration (s)'] || '?'}}s ·
+          <b>max_turn_id</b> ${{src._max_turn || '?'}} ·
+          <b>assistant 轮</b> ${{src._assistant_turns || '?'}} ·
+          ${{audio}}
+        </div>
+        <div style="font-size:11px; line-height:1.7;">${{linesHtml}}</div>
+      </div>
+    </td></tr>`;
+    return mainRow + detail;
+  }}).join('');
+
+  const el = document.getElementById('t2-cases-table-wrap');
+  el.innerHTML = `<div style="max-height: 640px; overflow-y: auto;">
+    <table class="t2-cases-table">${{headerHtml}}<tbody>${{bodyHtml}}</tbody></table>
+  </div>`;
+  // toggle
+  el.querySelectorAll('.t2-case-toggle').forEach(btn => {{
+    btn.addEventListener('click', e => {{
+      e.stopPropagation();
+      const tr = btn.closest('tr');
+      const cid = tr.getAttribute('data-cid');
+      if (t2ExpandedCases.has(cid)) t2ExpandedCases.delete(cid);
+      else t2ExpandedCases.add(cid);
+      renderT2CasesTable();
+    }});
+  }});
+  // 复制 Call ID
+  el.querySelectorAll('.col-id code').forEach(code => {{
+    code.addEventListener('click', () => {{
+      navigator.clipboard.writeText(code.textContent).then(() => showToast('已复制 ' + code.textContent));
+    }});
+  }});
+}}
+
+// 绑定 filter
+['t2-cases-filter-pn', 't2-cases-filter-cat', 't2-cases-page-size'].forEach(id => {{
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', renderT2CasesTable);
+}});
 
 // 启动轮询
 startT2LlmPoll();

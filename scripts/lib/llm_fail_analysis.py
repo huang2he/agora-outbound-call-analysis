@@ -106,8 +106,7 @@ SYSTEM_PROMPT = """你是一个外呼销售质检专家，专门评估 AI 外呼
   "fail_reason": "<≤30 字, 描述 agent 出了什么问题>",
   "fail_category": "<其中之一: 开场太突兀 | 话术机械重复 | 没接客户上文 | 误判客户意图 | 提问跳跃 | 信息收集不彻底 | 客户主动拒绝 | 其他>",
   "user_detect_turn": <int 或 null, 客户在哪个 user turn 开始反感/识破>,
-  "user_detect_signal": "<≤50 字, 客户原话或行为>",
-  "suggestion": "<≤40 字, 给 agent 的改进建议>"
+  "user_detect_signal": "<≤50 字, 客户原话或行为>"
 }
 
 注意:
