@@ -244,6 +244,8 @@ from build_dashboard import load_table, enrich, build_html, transcript_readable 
 
 
 HTML_BYTES = b""  # populated in main()
+ENRICHED_DF = None  # 给 /reload-html 用，保留 dataframe 引用以热重新 build HTML
+CURRENT_SOURCE_PATH = ""
 
 
 def _fetch_one(task: tuple[str, str]) -> tuple[str, str, bytes | None, str | None]:
@@ -294,6 +296,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, HTML_BYTES, "text/html; charset=utf-8")
         elif self.path == "/healthz":
             self._send(200, b"ok", "text/plain")
+        elif self.path == "/reload-html":
+            # 热重载: 重新 build_html (保留 LLM 内存状态), 不需要重启
+            try:
+                import importlib
+                import lib.agent_kda as _kda
+                import lib.llm_fail_analysis as _llmf
+                import build_dashboard as _bd
+                importlib.reload(_kda)
+                importlib.reload(_llmf)
+                importlib.reload(_bd)
+                g = globals()
+                _html = _bd.build_html(g["ENRICHED_DF"], source=g["CURRENT_SOURCE_PATH"])
+                g["HTML_BYTES"] = _html.encode("utf-8")
+                self._send(200, b'{"ok":true}', "application/json")
+            except Exception as e:  # noqa: BLE001
+                msg = json.dumps({"ok": False, "error": str(e)[:300]},
+                                 ensure_ascii=False).encode("utf-8")
+                self._send(500, msg, "application/json; charset=utf-8")
         elif self.path == "/llm-intent-status":
             with LLM_JOB_LOCK:
                 snap = {
@@ -549,8 +569,10 @@ def main() -> int:
     df = load_table(inp)
     enriched = enrich(df)
     html = build_html(enriched, source=inp.name)
-    global HTML_BYTES
+    global HTML_BYTES, ENRICHED_DF, CURRENT_SOURCE_PATH
     HTML_BYTES = html.encode("utf-8")
+    ENRICHED_DF = enriched
+    CURRENT_SOURCE_PATH = inp.name
 
     httpd, port = make_server(Handler, args.port, args.host)
     local_url = f"http://127.0.0.1:{port}/"
@@ -579,14 +601,19 @@ def main() -> int:
         from lib import llm_fail_analysis as F
     except ImportError:
         from scripts.lib import llm_fail_analysis as F
-    # 通过环境变量可选择采样：OPENAI_FAIL_SAMPLE_PER_BUCKET=20 → 每 (agent, pass_n)
-    # bucket 随机取 20 通跑 LLM。默认全量。
-    sample = os.environ.get("OPENAI_FAIL_SAMPLE_PER_BUCKET")
-    try:
-        sample_limit = int(sample) if sample else None
-    except ValueError:
-        sample_limit = None
-    F.kickoff(enriched, sample_limit=sample_limit)
+    # 优先从环境变量指定的快照加载, 避免重启 server 再跑一遍 LLM (跑一遍 ~15 分钟).
+    snapshot = os.environ.get("LLM_FAIL_SNAPSHOT", "").strip()
+    if snapshot and F.load_snapshot(snapshot):
+        print(f"[llm-fail-auto] using snapshot {snapshot}, skipping LLM run", flush=True)
+    else:
+        # 通过环境变量可选择采样：OPENAI_FAIL_SAMPLE_PER_BUCKET=20 → 每 (agent, pass_n)
+        # bucket 随机取 20 通跑 LLM。默认全量。
+        sample = os.environ.get("OPENAI_FAIL_SAMPLE_PER_BUCKET")
+        try:
+            sample_limit = int(sample) if sample else None
+        except ValueError:
+            sample_limit = None
+        F.kickoff(enriched, sample_limit=sample_limit)
 
     if not args.no_open:
         threading.Timer(0.4, lambda: webbrowser.open(local_url)).start()

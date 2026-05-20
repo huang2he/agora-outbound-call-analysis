@@ -277,6 +277,32 @@ def status_snapshot() -> dict:
         }
 
 
+def load_snapshot(snapshot_path: str | Path) -> bool:
+    """从磁盘加载已经跑过的 LLM 结果, 用于重启时免去重新跑 LLM."""
+    p = Path(snapshot_path).expanduser().resolve()
+    if not p.is_file():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return False
+    with LLM_FAIL_LOCK:
+        LLM_FAIL_JOB["status"] = "done"
+        LLM_FAIL_JOB["total"] = len(results)
+        LLM_FAIL_JOB["done"] = len(results)
+        LLM_FAIL_JOB["results"] = list(results)
+        LLM_FAIL_JOB["elapsed_s"] = float(data.get("elapsed_s") or 0)
+        LLM_FAIL_JOB["error"] = None
+        LLM_FAIL_JOB["model"] = str(data.get("model") or "")
+        LLM_FAIL_JOB["backend"] = str(data.get("backend") or "")
+        LLM_FAIL_JOB["started_at"] = time.time()
+    print(f"[llm-fail-auto] LOADED snapshot · {len(results)} results from {p}", flush=True)
+    return True
+
+
 def kickoff(df_enriched, sample_limit: int | None = None) -> None:
     """后台启动失败分析。仅对"有效会话 且 pass_n < 4"的通话跑。
 

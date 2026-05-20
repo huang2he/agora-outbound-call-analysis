@@ -877,6 +877,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <h2>5 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
   <p class="section-note">服务端用大模型 (gpt-5.4 / qwen3.6-plus) 逐通分析"agent 在哪一轮出问题 / 客户在哪一轮识破 / 失败类别"。后台跑，每 5 秒自动刷新。</p>
+
+  <div id="t2-llm-kpi" class="stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 12px; display: none;">
+    <div class="stat">
+      <div class="label">首轮翻车率 (A1)</div>
+      <div class="val" id="kpi-a1-rate">-</div>
+      <div class="pct" id="kpi-a1-detail">agent 第 1 句就把客户聊死的占比</div>
+    </div>
+    <div class="stat">
+      <div class="label">前 2 轮翻车率 (A1+A2)</div>
+      <div class="val" id="kpi-early-rate">-</div>
+      <div class="pct" id="kpi-early-detail">99% 失败可能集中在这里 → 头部话术是瓶颈</div>
+    </div>
+    <div class="stat">
+      <div class="label">agent 责任失败占比</div>
+      <div class="val" id="kpi-blame-rate">-</div>
+      <div class="pct" id="kpi-blame-detail">排除"客户主动拒绝"后的可改进面</div>
+    </div>
+    <div class="stat">
+      <div class="label">机会客户被聊死</div>
+      <div class="val" id="kpi-opp-killed">-</div>
+      <div class="pct" id="kpi-opp-detail">开局中性/积极 → 卡 0 关</div>
+    </div>
+  </div>
+
   <div class="card" id="t2-llm-progress-wrap" style="display: none;">
     <div class="progress" style="display: block;">
       <div id="t2-llm-progress-text"></div>
@@ -2410,8 +2434,38 @@ function renderT2LlmCharts() {{
     if (tw) tw.innerHTML = '<div style="color:var(--muted); padding: 12px; font-size: 12px;">尚无 LLM 分析结果。</div>';
     const m = document.getElementById('t2-cases-meta');
     if (m) m.textContent = '';
+    const k = document.getElementById('t2-llm-kpi'); if (k) k.style.display = 'none';
     return;
   }}
+
+  // ── KPI 行: agent 视角的核心指标 ──
+  (function renderLlmKpi() {{
+    const kpiBox = document.getElementById('t2-llm-kpi');
+    if (!kpiBox) return;
+    kpiBox.style.display = '';
+    const total = ok.length;
+    const a1 = ok.filter(r => parseInt(r.fail_turn,10) === 1).length;
+    const a2 = ok.filter(r => parseInt(r.fail_turn,10) === 2).length;
+    const customerBlame = ok.filter(r => r.fail_category === '客户主动拒绝').length;
+    const agentBlame = total - customerBlame;
+    // 开局中性/积极 且 卡 0 关 = agent 把可救援客户搞砸
+    const oppKilled = ok.filter(r =>
+      (r.user_sentiment_start === '中性' || r.user_sentiment_start === '积极')
+      && parseInt(r.pass_n, 10) === 0
+    ).length;
+    const oppPool = ok.filter(r =>
+      r.user_sentiment_start === '中性' || r.user_sentiment_start === '积极'
+    ).length;
+    const pct = (a, b) => b ? (a/b*100).toFixed(1) + '%' : '-';
+    document.getElementById('kpi-a1-rate').textContent = pct(a1, total);
+    document.getElementById('kpi-a1-detail').textContent = `${{a1}} / ${{total}} 通在 A1 翻车`;
+    document.getElementById('kpi-early-rate').textContent = pct(a1+a2, total);
+    document.getElementById('kpi-early-detail').textContent = `A1+A2 共 ${{a1+a2}} 通 (A1=${{a1}} · A2=${{a2}})`;
+    document.getElementById('kpi-blame-rate').textContent = pct(agentBlame, total);
+    document.getElementById('kpi-blame-detail').textContent = `${{agentBlame}} 通 agent 责任 / ${{customerBlame}} 通客户主动拒绝`;
+    document.getElementById('kpi-opp-killed').textContent = pct(oppKilled, oppPool);
+    document.getElementById('kpi-opp-detail').textContent = `${{oppKilled}} / ${{oppPool}} 通可救援客户被聊到卡 0 关`;
+  }})();
 
   // fail_turn 分布
   const failTurnCount = {{}};
