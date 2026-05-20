@@ -27,6 +27,7 @@ serve_dashboard.py / build_dashboard.py。
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from datetime import datetime, timezone, timedelta
@@ -36,6 +37,31 @@ import pandas as pd
 
 BJT = timezone(timedelta(hours=8))
 TIME_COL = "Call Start Time"
+
+# Structured Output 里 dashboard 不识别 / 不需要的多余字段, 默认在清洗时去掉.
+# 现在只有"购车省份" (PROVINCE_FALLBACK_FIELD, dead code, 完全无效).
+SO_DROP_FIELDS_DEFAULT = ["购车省份"]
+
+
+def strip_so_fields(raw: str, drop_fields: list[str]) -> str:
+    """把 Structured Output JSON 字符串里指定字段去掉. 解析失败 / 空 → 原样返回."""
+    if not raw or not str(raw).strip():
+        return raw
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    if not isinstance(obj, dict):
+        return raw
+    changed = False
+    for f in drop_fields:
+        if f in obj:
+            del obj[f]
+            changed = True
+    if not changed:
+        return raw
+    # ensure_ascii=False 保留中文, separators 紧凑 (和原始格式一致)
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
 # ─────────────────── 时间解析 ───────────────────
@@ -110,6 +136,11 @@ def main() -> int:
     p.add_argument("--agent", help="Agent Name 必须包含的关键字 (大小写不敏感)")
     p.add_argument("--campaign", help="Campaign Name 必须包含的关键字")
     p.add_argument("--hangup", help='Hangup Reason 白名单, 逗号分隔. 例: "USER_HANGUP,AI_HANGUP"')
+    p.add_argument("--drop-so-field", action="append", default=None,
+                   help='Structured Output JSON 里要剔除的字段, 可多次指定. '
+                        f'默认去掉: {SO_DROP_FIELDS_DEFAULT}. 用 "--keep-all-so" 关闭剔除.')
+    p.add_argument("--keep-all-so", action="store_true",
+                   help="保留 Structured Output 原始字段, 不做任何剔除")
     p.add_argument("--dry-run", action="store_true", help="只显示筛选后的行数和分布, 不写文件")
     p.add_argument("--show-times", action="store_true", help="打印筛选后的时间窗口边界 (BJT 格式)")
     args = p.parse_args()
@@ -175,6 +206,17 @@ def main() -> int:
     if n_out == 0:
         print("⚠️ 0 行被保留, 不写文件", file=sys.stderr)
         return 1
+
+    # Structured Output 字段清洗
+    if not args.keep_all_so and "Structured Output" in out.columns:
+        drop = args.drop_so_field or SO_DROP_FIELDS_DEFAULT
+        # 统计有多少行受影响, 给用户反馈
+        before = out["Structured Output"].fillna("").astype(str)
+        after = before.apply(lambda s: strip_so_fields(s, drop))
+        diff_cnt = int((before != after).sum())
+        if diff_cnt:
+            print(f"  Structured Output 剔除字段 {drop}: 影响 {diff_cnt} 行", file=sys.stderr)
+        out = out.assign(**{"Structured Output": after})
 
     # 决定输出路径
     if args.output:

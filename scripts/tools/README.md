@@ -49,9 +49,30 @@ UTC (ISO Z) 格式，脚本自动换算 (+8 小时)。
 --agent lxc                       Agent Name 包含关键字 (大小写不敏感)
 --campaign "外呼测试"             Campaign Name 包含关键字
 --hangup USER_HANGUP,AI_HANGUP    Hangup Reason 白名单
+--drop-so-field 购车省份          Structured Output 里要剔除的字段 (可多次)
+--keep-all-so                     关闭剔除, 保留原始 Structured Output
 -o output.csv                     显式指定输出路径 (默认自动取名)
 --dry-run                         只打印筛选后行数和分布, 不写文件
 --show-times                      额外打印筛选后实际的 BJT 起止时间
+```
+
+### Structured Output 字段清洗 (默认开启)
+
+dashboard 只识别 6 个字段 (`购车品牌` / `购车型号` / `购车城市` / `购车时间` /
+`购车姓名` / `购车意向`)。研发原始导出里还有一个 `购车省份` 字段，dashboard
+不用，是 dead column。
+
+**filter 默认会把 `购车省份` 从 Structured Output JSON 里剥掉**，让喂给
+dashboard 的数据更干净。如果你想保留:
+
+```bash
+filter.sh raw.csv --bjt "5-21 10:00 - 12:00" --keep-all-so
+```
+
+如果以后研发又多加了别的没用字段, 用 `--drop-so-field` 追加:
+
+```bash
+filter.sh raw.csv --bjt "..." --drop-so-field 购车省份 --drop-so-field 购车备注
 ```
 
 ### 输出
