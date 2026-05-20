@@ -165,16 +165,16 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- metric extraction ----------
 
-FUNNEL_LABELS = ["拨打总数", "真人接听", "完整转换", "带车型完整转换", "意向客户"]
+FUNNEL_LABELS = ["拨打总数", "真人接听", "意向客户", "完整转换", "带车型完整转换"]
 
 
 def funnel_counts(df: pd.DataFrame) -> list[int]:
     return [
         len(df),
         int(df["_human"].sum()),
+        int(df["_intent"].sum()),
         int(df["_full"].sum()),
         int(df["_full_with_model"].sum()),
-        int(df["_intent"].sum()),
     ]
 
 
@@ -197,7 +197,7 @@ def duration_histogram(series: pd.Series, max_x: int) -> tuple[list[str], list[i
 
 
 def early_hangup_rows(df: pd.DataFrame) -> list[dict]:
-    """恰好 N 句挂断（互斥分桶）."""
+    """恰好 N 句挂断（互斥分桶）+ "10s 内首句挂断" 单独一行."""
     human = df[df["_human"]]
     total = len(human)
     if total == 0:
@@ -206,6 +206,15 @@ def early_hangup_rows(df: pd.DataFrame) -> list[dict]:
     for n, label in [(1, "首句挂断 (1 句)"), (2, "2 句挂断"), (3, "3 句挂断"), (4, "4 句挂断"), (5, "5 句挂断")]:
         cnt = int((human["_assistant_turns"] == n).sum())
         rows.append({"label": label, "count": cnt, "pct": round(cnt / total * 100, 1)})
+    # 新增：首句挂断里时长 < 10 秒的，也就是 agent 开场白还没说完就被切话的硬核 case.
+    # 这个不破坏上面的互斥分桶，单独追加在表底。
+    cnt10 = int(((human["_assistant_turns"] == 1) & (human["Duration (seconds)"] < 10)).sum())
+    rows.append({
+        "label": "首句挂断 (<10秒)",
+        "count": cnt10,
+        "pct": round(cnt10 / total * 100, 1),
+        "is_subset": True,   # UI 可识别为"父行的子集统计"展示成缩进
+    })
     return rows
 
 
@@ -234,7 +243,17 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
     full_in_human = human[human["_full"]]
     intent_in_human = human[human["_intent"]]
 
-    dur_labels, dur_human = duration_histogram(human["Duration (seconds)"], dur_x_max)
+    dur_labels, dur_human  = duration_histogram(human["Duration (seconds)"],        dur_x_max)
+    _,          dur_full   = duration_histogram(full_in_human["Duration (seconds)"], dur_x_max)
+    _,          dur_intent = duration_histogram(intent_in_human["Duration (seconds)"], dur_x_max)
+
+    def _avg_dur(s: pd.Series) -> float:
+        s = s[s > 0]
+        return round(float(s.mean()), 1) if len(s) else 0.0
+
+    avg_dur_human  = _avg_dur(human["Duration (seconds)"])
+    avg_dur_full   = _avg_dur(full_in_human["Duration (seconds)"])
+    avg_dur_intent = _avg_dur(intent_in_human["Duration (seconds)"])
 
     # 首句挂断 = 真人接听 且 assistant 轮数 == 1。看这部分通话的 Duration 分布，
     # 直观看出 AI 第一句还没说完就被掐掉的比例。
@@ -270,23 +289,28 @@ def slice_data(df_slice: pd.DataFrame, turn_x_max: int, dur_x_max: int,
         "n": len(df_slice),
         "totals": {"labels": FUNNEL_LABELS, "values": totals},
         # Funnel denominators for the hero KPI percentages: 总 / 真人 / 完整转换.
-        # 接听 was removed from the funnel since for these batches it's ~ same as 拨打.
+        # FUNNEL_LABELS 顺序 = [拨打, 真人, 意向, 完整, 带车型完整]，索引对应:
         "denominators": {
-            "total": totals[0],
-            "human": totals[1],
-            "full": totals[2],
+            "total": totals[0],   # 拨打总数
+            "human": totals[1],   # 真人接听
+            "full":  totals[3],   # 完整转换
         },
         "turn_dist": {
             "x": list(range(1, turn_x_max + 1)),
+            # 顺序与漏斗一致：真人 → 意向 → 完整
             "series": [
                 {"name": "真人接听 (全部)", "data": turn_histogram(human["_max_turn_id"], turn_x_max)},
-                {"name": "完整转换", "data": turn_histogram(full_in_human["_max_turn_id"], turn_x_max)},
                 {"name": "意向客户", "data": turn_histogram(intent_in_human["_max_turn_id"], turn_x_max)},
+                {"name": "完整转换", "data": turn_histogram(full_in_human["_max_turn_id"], turn_x_max)},
             ],
         },
         "duration_dist": {
             "x": dur_labels,
-            "series": [{"name": "真人接听", "data": dur_human}],
+            "series": [
+                {"name": "真人接听", "data": dur_human,  "avg": avg_dur_human,  "n": int((human["Duration (seconds)"] > 0).sum())},
+                {"name": "完整转换", "data": dur_full,   "avg": avg_dur_full,   "n": int((full_in_human["Duration (seconds)"] > 0).sum())},
+                {"name": "意向客户", "data": dur_intent, "avg": avg_dur_intent, "n": int((intent_in_human["Duration (seconds)"] > 0).sum())},
+            ],
         },
         "early_hangup": early_hangup_rows(df_slice),
         "first_sentence_dur": {
@@ -447,19 +471,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .hero-funnel .funnel-wrap .card {{ flex: 1; }}
   .hero-funnel .funnel-wrap .chart {{ height: 100%; min-height: 460px; }}
   /* Tint each KPI card to match its slice color on the funnel:
-     拨打=blue · 真人=amber · 完整=cyan · 带车型完整=teal · 意向=purple. */
+     拨打=blue · 真人=amber · 意向=purple · 完整=cyan · 带车型完整=teal. */
   .stat {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; position: relative; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }}
   .stat::after {{ content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; }}
   .stat:nth-child(1) {{ background: #eff6ff; border-color: #bfdbfe; }}
   .stat:nth-child(1)::after {{ background: #2563eb; }}
   .stat:nth-child(2) {{ background: #fffbeb; border-color: #fde68a; }}
   .stat:nth-child(2)::after {{ background: #f59e0b; }}
-  .stat:nth-child(3) {{ background: #ecfeff; border-color: #a5f3fc; }}
-  .stat:nth-child(3)::after {{ background: #06b6d4; }}
-  .stat:nth-child(4) {{ background: #f0fdfa; border-color: #99f6e4; }}
-  .stat:nth-child(4)::after {{ background: #14b8a6; }}
-  .stat:nth-child(5) {{ background: #faf5ff; border-color: #d8b4fe; }}
-  .stat:nth-child(5)::after {{ background: #a855f7; }}
+  .stat:nth-child(3) {{ background: #faf5ff; border-color: #d8b4fe; }}
+  .stat:nth-child(3)::after {{ background: #a855f7; }}
+  .stat:nth-child(4) {{ background: #ecfeff; border-color: #a5f3fc; }}
+  .stat:nth-child(4)::after {{ background: #06b6d4; }}
+  .stat:nth-child(5) {{ background: #f0fdfa; border-color: #99f6e4; }}
+  .stat:nth-child(5)::after {{ background: #14b8a6; }}
   .stat .label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }}
   .stat .val {{ font-size: 26px; font-weight: 700; margin-top: 4px; color: var(--text); line-height: 1.1; }}
   .stat .pct {{ font-size: 12px; color: var(--muted); margin-top: 2px; }}
@@ -642,6 +666,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .t2-bucket .meta {{ font-size: 11px; color: var(--muted); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); line-height: 1.5; }}
   .t2-bucket .meta b {{ color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }}
 
+  /* Transcript 案例行（agent / user 区分颜色） */
+  .t2-case-line {{ padding: 2px 6px; white-space: pre-wrap; word-break: break-word; }}
+  .t2-case-line.agent {{ color: #1e3a8a; }}
+  .t2-case-line.user  {{ color: #047857; }}
+
   /* 0 关原因分布柱 */
   .t2-reason-row {{ display: grid; grid-template-columns: 110px 1fr 70px; gap: 10px; align-items: center; padding: 4px 0; font-size: 12px; }}
   .t2-reason-row .label {{ color: var(--text); }}
@@ -701,17 +730,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 <div class="turn-card">
-  <h3 class="turn-card-title">完整转换</h3>
-  <div class="turn-card-body">
-    <div class="turn-bar"><div id="chart-turn-full" class="chart"></div></div>
-    <div class="turn-donut"><div id="chart-turn-full-donut" class="chart"></div></div>
-  </div>
-</div>
-<div class="turn-card">
   <h3 class="turn-card-title">意向客户</h3>
   <div class="turn-card-body">
     <div class="turn-bar"><div id="chart-turn-intent" class="chart"></div></div>
     <div class="turn-donut"><div id="chart-turn-intent-donut" class="chart"></div></div>
+  </div>
+</div>
+<div class="turn-card">
+  <h3 class="turn-card-title">完整转换</h3>
+  <div class="turn-card-body">
+    <div class="turn-bar"><div id="chart-turn-full" class="chart"></div></div>
+    <div class="turn-donut"><div id="chart-turn-full-donut" class="chart"></div></div>
   </div>
 </div>
 
@@ -741,11 +770,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       首句挂断 · Duration 分布
       <span class="view-toggle" id="fs-view-toggle">
         <button data-view="all" class="active">全部</button>
-        <button data-view="short">短挂断 (&lt;15秒)</button>
+        <button data-view="short">短挂断 (&lt;10秒)</button>
       </span>
       <span class="export-hint" style="margin-left:auto;">点柱导出</span>
     </h3>
-    <p class="section-note" style="margin:0 0 12px;">"AI 刚说完第一句就被掐掉"的通话时长分布。"短挂断"视角聚焦 <b>&lt; 15 秒</b> 的，那些通常是开场白没说完就被切话；"全部"视角包括开场白说完后客户才挂的。</p>
+    <p class="section-note" style="margin:0 0 12px;">"AI 刚说完第一句就被掐掉"的通话时长分布。"短挂断"视角聚焦 <b>&lt; 10 秒</b> 的，那些通常是开场白没说完就被切话；"全部"视角包括开场白说完后客户才挂的。</p>
     <div id="chart-first-sentence-dur" class="chart"></div>
   </div>
 </div>
@@ -771,31 +800,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     "真实用户发言" = role=user 的 turn，且 <code>metadata.source ≠ silence</code>（不是系统注入的静默占位）、content 非空、不含 IVR 语音信箱关键词（"请留下你的姓名"/"智语音留言"/"帮你确认此人" 等）。
     剩下两类是<b>客户全程未开口</b>的通话：<b>首句挂断</b>（agent 说 1 句开场白客户没回）+ <b>接通无应答</b>（agent 反复追问客户始终不说话）。
   </p>
-  <div class="card"><div id="t2-chart-sankey" class="chart" style="height: 360px;"></div></div>
+  <div class="card"><div id="t2-chart-sankey" class="chart" style="height: 560px;"></div></div>
 
-  <h2>2 · 4 关独立通过率 (有效会话内)</h2>
-  <p class="section-note">每关独立看，不要求线性。说明 agent 收哪个槽位最弱。</p>
-  <div class="card"><div id="t2-slot-bars"></div></div>
-
-  <h2>3 · 通关分桶 — 每个桶花了多少轮</h2>
-  <p class="section-note">按"过了几关"分 5 桶。每桶看占比 + 平均总轮次 (assistant + user) + 平均通话时长。点桶切换详情。</p>
+  <h2>2 · 通关分桶 — 在第几关被卡住</h2>
+  <p class="section-note">
+    按"过了几关"分 5 桶（严格线性递进：第 N 关 ⇔ 第 1..N 全过）。每桶 = "卡在第 N+1 关"的通话集合。
+    比如 <b>"0 关"桶 = agent 一关都没问到</b>；<b>"3 关"桶 = 收到了车型/城市/时间但卡在第 4 关姓氏</b>；<b>"4 关"桶 = 全过</b>。
+    点桶 → 看下方 3 个相关数据。
+  </p>
   <div id="t2-buckets" class="t2-bucket-grid"></div>
 
-  <h2>4 · 选中桶详情 <span id="t2-bk-title" style="color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px;"></span></h2>
+  <h2>3 · 选中桶详情 <span id="t2-bk-title" style="color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px;"></span></h2>
   <div class="t2-grid">
     <div class="card">
-      <h3 class="t2-card-title">该桶里填了哪些槽位</h3>
-      <p class="section-note">看这部分通话至少摸到了哪几关（独立判定）。</p>
-      <div id="t2-bk-slots"></div>
+      <h3 class="t2-card-title">该桶为什么卡住 <span style="font-weight:400;color:var(--muted);font-size:11px;">· LLM 判定的失败类别</span></h3>
+      <p class="section-note">把该桶的 LLM 失败画像聚合：核心是 agent 卡在 <b id="t2-bk-stuck">-</b>。</p>
+      <div id="t2-bk-reasons"></div>
     </div>
     <div class="card">
-      <h3 class="t2-card-title">该桶 0 关原因分布 <span style="font-weight: 400; color: var(--muted); font-size: 11px;">(仅 0 关桶有数据 · 关键词启发式)</span></h3>
-      <p class="section-note">关键词启发式分类。更细的归因由下方 LLM 模块给。</p>
-      <div id="t2-bk-reasons"></div>
+      <h3 class="t2-card-title">该桶 typical 案例 <span style="font-weight:400;color:var(--muted);font-size:11px;">· 5 个最长 transcript</span></h3>
+      <p class="section-note">看实际通话长什么样。<span style="color:#b91c1c;font-weight:600;">红色高亮</span> = LLM 判定 agent 出问题的那一句。</p>
+      <div id="t2-bk-cases" style="max-height: 420px; overflow-y: auto;"></div>
     </div>
   </div>
 
-  <h2>5 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
+  <h2>4 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
   <p class="section-note">服务端用大模型 (gpt-5.4 / qwen3.6-plus) 逐通分析"agent 在哪一轮出问题 / 客户在哪一轮识破 / 失败类别"。后台跑，每 5 秒自动刷新。</p>
   <div class="card" id="t2-llm-progress-wrap" style="display: none;">
     <div class="progress" style="display: block;">
@@ -895,9 +924,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 const DATA = {data_json};
 
-// Funnel slot colors in label order (blue/amber/cyan/teal/purple). Green (#10b981)
-// is pushed past the funnel since 接听 was removed.
-const PALETTE = ['#2563eb', '#f59e0b', '#06b6d4', '#14b8a6', '#a855f7', '#10b981', '#f43f5e', '#0ea5e9'];
+// Funnel slot colors in label order (blue/amber/purple/cyan/teal). 顺序与 hero
+// KPI 卡 + Funnel 图 layer 完全一致：拨打/真人/意向/完整/带车型完整。
+const PALETTE = ['#2563eb', '#f59e0b', '#a855f7', '#06b6d4', '#14b8a6', '#10b981', '#f43f5e', '#0ea5e9'];
 const TEXT = '#0f172a';
 const MUTED = '#64748b';
 const BORDER = '#e2e8f0';
@@ -934,10 +963,12 @@ const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
 
 // Bar series name → corresponding subset filter for click-to-export.
+// 顺序：真人 → 意向 → 完整 (和漏斗顺序一致)
+// 配色与 hero KPI 卡 + 漏斗 layer 完全一致 (蓝/紫/青)
 const TURN_SERIES = [
   {{ key: 'human',  name: '真人接听 (全部)', barId: 'chart-turn-human',  donutId: 'chart-turn-human-donut',  color: '#2563eb', filter: r => r._human }},
-  {{ key: 'full',   name: '完整转换',        barId: 'chart-turn-full',   donutId: 'chart-turn-full-donut',   color: '#10b981', filter: r => r._human && r._full }},
-  {{ key: 'intent', name: '意向客户',        barId: 'chart-turn-intent', donutId: 'chart-turn-intent-donut', color: '#f59e0b', filter: r => r._human && r._intent }},
+  {{ key: 'intent', name: '意向客户',        barId: 'chart-turn-intent', donutId: 'chart-turn-intent-donut', color: '#a855f7', filter: r => r._human && r._intent }},
+  {{ key: 'full',   name: '完整转换',        barId: 'chart-turn-full',   donutId: 'chart-turn-full-donut',   color: '#06b6d4', filter: r => r._human && r._full }},
 ];
 
 let currentAgentKey = DATA.all_key;
@@ -1260,8 +1291,9 @@ function exportTurnTriple(turnId) {{
 // Single-group filters
 const FILTERS = {{
   funnel: (idx, scope) => {{
-    const fns = [r => true, r => r._human, r => r._full, r => r._full_with_model, r => r._intent];
-    return [scope.filter(fns[idx]), `funnel-${{['all','human','full','full-with-model','intent'][idx]}}`];
+    // 顺序：0 拨打 / 1 真人 / 2 意向 / 3 完整 / 4 带车型完整
+    const fns = [r => true, r => r._human, r => r._intent, r => r._full, r => r._full_with_model];
+    return [scope.filter(fns[idx]), `funnel-${{['all','human','intent','full','full-with-model'][idx]}}`];
   }},
   duration: (sec, scope) => {{
     return [scope.filter(r => r._human && r._duration === sec), `duration-${{sec}}s`];
@@ -1297,9 +1329,9 @@ function renderHero(totals, denominators) {{
   const SHOW = [
     [],                              // 0 拨打总数
     ['total'],                       // 1 真人接听
-    ['total', 'human'],              // 2 完整转换
-    ['total', 'human', 'full'],      // 3 带车型完整转换
-    ['total', 'human'],              // 4 意向客户
+    ['total', 'human'],              // 2 意向客户
+    ['total', 'human'],              // 3 完整转换
+    ['total', 'human', 'full'],      // 4 带车型完整转换
   ];
   const html = totals.labels.map((label, i) => {{
     const v = totals.values[i];
@@ -1350,6 +1382,18 @@ function renderTurnTriad(td) {{
   TURN_SERIES.forEach((spec, i) => {{
     const series = td.series[i];
     const total = series.data.reduce((s, v) => s + v, 0) || 1;
+    // 平均轮次 = sum(turn_id * count) / sum(count). td.x 是 1..N。
+    const weightedSum = series.data.reduce((s, v, idx) => s + v * td.x[idx], 0);
+    const avgTurn = total > 0 ? (weightedSum / total) : 0;
+    // 更新卡片标题旁的"平均"小字
+    const titleEl = document.querySelector(`#${{spec.barId}}`)
+      .closest('.turn-card')?.querySelector('.turn-card-title');
+    if (titleEl) {{
+      const baseTitle = titleEl.dataset.baseTitle || titleEl.textContent;
+      titleEl.dataset.baseTitle = baseTitle;
+      titleEl.innerHTML = `${{baseTitle}}  <span style="color:var(--muted); font-weight:400; font-size:11px; margin-left:6px;">平均轮次 <b style="color:var(--text); font-variant-numeric: tabular-nums;">${{avgTurn.toFixed(1)}}</b></span>`;
+    }}
+
     // Trim trailing zeros so the visible bars fill the chart area instead of
     // huddling on the left half. Each subset has its own tail length (真人接听
     // typically goes furthest; 完整转换/意向 shorter), so cards stay independent.
@@ -1424,32 +1468,59 @@ function renderTurnTriad(td) {{
 }}
 
 function renderDuration(dd) {{
+  // 3 个 series — 真人接听 (橙) / 完整转换 (青) / 意向客户 (紫)
+  // legend 的 label 上同时显示该 series 的平均时长 (来自后端预计算)
+  const SERIES_COLORS = ['#f59e0b', '#06b6d4', '#a855f7'];
+  const legendData = dd.series.map(s => ({{
+    name: s.name,
+    icon: 'roundRect',
+  }}));
   charts['chart-duration'].setOption({{
-    color: ['#f59e0b'],
+    color: SERIES_COLORS,
     tooltip: tooltipBase({{
       trigger: 'axis', axisPointer: {{ type: 'shadow' }},
       formatter: params => {{
-        const p = params[0];
-        return `<b>${{p.name}} 秒</b><br>${{p.seriesName}}: <b>${{p.value}}</b> 通`;
+        let html = `<b>${{params[0].name}} 秒</b><br>`;
+        params.forEach(p => {{
+          if (p.value > 0) html += `${{p.marker}} ${{p.seriesName}}: <b>${{p.value}}</b> 通<br>`;
+        }});
+        return html;
       }},
     }}),
-    legend: {{ data: dd.series.map(s => s.name), textStyle: {{ color: TEXT, fontSize: 12 }}, top: 8 }},
-    grid: Object.assign({{}}, baseGrid, {{ bottom: 56 }}),
+    legend: {{
+      data: legendData, textStyle: {{ color: TEXT, fontSize: 12 }}, top: 8,
+      formatter: name => {{
+        const s = dd.series.find(x => x.name === name);
+        if (!s) return name;
+        return `${{name}}  (n=${{s.n}} · 平均 ${{s.avg}}s)`;
+      }},
+    }},
+    grid: Object.assign({{}}, baseGrid, {{ bottom: 56, top: 38 }}),
     xAxis: Object.assign({{ type: 'category', name: '秒', data: dd.x, axisLabel: {{ color: MUTED, fontSize: 10, interval: 0 }} }}, baseAxis),
-    yAxis: Object.assign({{ type: 'value', name: '真人接听数' }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: '通话数' }}, baseAxis),
     dataZoom: [
       {{ type: 'inside', xAxisIndex: 0 }},
       {{ type: 'slider', xAxisIndex: 0, height: 18, bottom: 16, borderColor: BORDER, backgroundColor: '#f8fafc',
          fillerColor: 'rgba(37,99,235,0.12)', handleStyle: {{ color: '#2563eb' }}, textStyle: {{ color: MUTED, fontSize: 10 }} }},
     ],
-    series: dd.series.map(s => ({{
+    series: dd.series.map((s, i) => ({{
       name: s.name, type: 'bar', data: s.data,
       itemStyle: {{ borderRadius: [3, 3, 0, 0] }},
+      // 用 markLine 在该 series 的平均时长位置画一条垂直虚线
+      markLine: s.avg ? {{
+        symbol: 'none',
+        lineStyle: {{ color: SERIES_COLORS[i], type: 'dashed', width: 1.5, opacity: 0.8 }},
+        label: {{
+          formatter: `μ=${{s.avg}}s`, color: SERIES_COLORS[i], fontSize: 10,
+          position: 'insideEndTop',
+        }},
+        data: [{{ xAxis: String(Math.round(s.avg)) }}],
+      }} : undefined,
     }})),
   }}, true);
 }}
 
-// View mode for the 首句挂断 · Duration chart: 'all' or 'short' (<15s only).
+// View mode for the 首句挂断 · Duration chart: 'all' or 'short' (<10s only).
 let firstSentenceView = 'all';
 
 function firstSentenceData(viewMode) {{
@@ -1457,11 +1528,11 @@ function firstSentenceData(viewMode) {{
   // filter) doesn't need a backend round-trip. Restricted to the current
   // dropdown scope as usual.
   const base = scopedRows().filter(r => r._human && r._assistant_turns === 1);
-  const rows = viewMode === 'short' ? base.filter(r => r._duration < 15) : base;
+  const rows = viewMode === 'short' ? base.filter(r => r._duration < 10) : base;
   let maxSec = 0;
   rows.forEach(r => {{ if (r._duration > maxSec) maxSec = r._duration; }});
   // Always show at least 0..5s buckets so even an empty/short view looks like a chart.
-  if (viewMode === 'short') maxSec = Math.min(Math.max(maxSec, 5), 14);
+  if (viewMode === 'short') maxSec = Math.min(Math.max(maxSec, 5), 9);
   else maxSec = Math.max(maxSec, 5);
   const data = new Array(maxSec + 1).fill(0);
   rows.forEach(r => {{ if (r._duration >= 0 && r._duration <= maxSec) data[r._duration]++; }});
@@ -1517,11 +1588,21 @@ function renderEarlyHangupTable(rows) {{
   el.innerHTML = `<table><thead><tr><th>类别</th><th style="text-align:right;">数量</th><th style="text-align:right;">占真人接听</th></tr></thead><tbody>${{
     rows.map((r, i) => {{
       const w = Math.min(r.pct, 100);
-      return `<tr class="clickable" data-n="${{i+1}}"><td>${{r.label}}</td><td class="num">${{r.count}}</td><td class="pct-bar"><div class="fill" style="width:${{w}}%;"></div><span class="pct-text">${{r.pct}}%</span></td></tr>`;
+      const cls = r.is_subset ? 'clickable subset' : 'clickable';
+      const labelHtml = r.is_subset ? `<span style="color:var(--muted); margin-right:6px;">└</span>${{r.label}}` : r.label;
+      // 用 data-n 给互斥分桶 (1-5)；data-special 给 10s 内首句挂断
+      const dataAttr = r.is_subset ? `data-special="first-10s"` : `data-n="${{i+1}}"`;
+      return `<tr class="${{cls}}" ${{dataAttr}}><td>${{labelHtml}}</td><td class="num">${{r.count}}</td><td class="pct-bar"><div class="fill" style="width:${{w}}%;"></div><span class="pct-text">${{r.pct}}%</span></td></tr>`;
     }}).join('')
   }}</tbody></table>`;
   el.querySelectorAll('tr.clickable').forEach(tr => {{
     tr.addEventListener('click', () => {{
+      const special = tr.getAttribute('data-special');
+      if (special === 'first-10s') {{
+        const subset = scopedRows().filter(r => r._human && r._assistant_turns === 1 && r._duration < 10);
+        exportRows(subset, 'first-hangup-under-10s');
+        return;
+      }}
       const n = parseInt(tr.getAttribute('data-n'), 10);
       const [rows, hint] = FILTERS.earlyHangup(n, scopedRows());
       exportRows(rows, hint);
@@ -1687,12 +1768,12 @@ charts['chart-field-count'].on('click', p => {{
 }});
 
 // 首句挂断 Duration bar: click → export the calls hung up at exactly that
-// second. Respects the current view (all vs short < 15s).
+// second. Respects the current view (all vs short < 10s).
 charts['chart-first-sentence-dur'].on('click', p => {{
   if (p.componentType !== 'series') return;
   const sec = parseInt(p.name, 10);
   const base = scopedRows().filter(r => r._human && r._assistant_turns === 1 && r._duration === sec);
-  const subset = firstSentenceView === 'short' ? base.filter(r => r._duration < 15) : base;
+  const subset = firstSentenceView === 'short' ? base.filter(r => r._duration < 10) : base;
   const tag = firstSentenceView === 'short' ? 'short' : 'all';
   exportRows(subset, `first-sentence-${{sec}}s-${{tag}}`);
 }});
@@ -1817,46 +1898,54 @@ function renderT2Scope() {{
     }}),
     series: [{{
       type: 'sankey',
-      data: nodesFiltered.map(n => ({{ ...n, itemStyle: {{ color: colorMap[n.name] || '#94a3b8' }} }})),
+      data: nodesFiltered.map(n => {{
+        const parts = n.name.split('\\n');
+        const label = parts[0];
+        const val = parts[1] || '';
+        return {{
+          name: n.name,
+          itemStyle: {{ color: colorMap[n.name] || '#94a3b8' }},
+          // 通关 0/1/2/3/4 节点的小数字往右挪，避免和 0 关挤
+          label: {{
+            position: 'right',
+            formatter: () => `{{a|${{label}}}}\\n{{b|${{val}}}}`,
+            rich: {{
+              a: {{ color: TEXT, fontSize: 12, fontWeight: 600, lineHeight: 16 }},
+              b: {{ color: MUTED, fontSize: 11, lineHeight: 14 }},
+            }},
+          }},
+        }};
+      }}),
       links: linksFiltered,
-      nodeAlign: 'left',
-      nodeWidth: 18,
-      nodeGap: 12,
-      left: '4%', right: '14%', top: '4%', bottom: '4%',
-      label: {{ color: TEXT, fontSize: 11, fontWeight: 500 }},
-      lineStyle: {{ curveness: 0.5, color: 'gradient', opacity: 0.55 }},
-      emphasis: {{ focus: 'adjacency', lineStyle: {{ opacity: 0.8 }} }},
+      nodeAlign: 'justify',
+      nodeWidth: 16,
+      nodeGap: 18,
+      // 右边节点 label 文字较长，给 22% 边距；上下 +1% 防顶
+      left: '3%', right: '22%', top: '3%', bottom: '3%',
+      lineStyle: {{ curveness: 0.5, color: 'gradient', opacity: 0.5 }},
+      emphasis: {{ focus: 'adjacency', lineStyle: {{ opacity: 0.85 }} }},
+      // 给小节点一个视觉最小高度（数据真实，渲染时强制不被压成线）
+      layoutIterations: 64,
     }}],
   }}, true);
-}}
-
-function renderT2SlotBars() {{
-  const d = t2CurrentData();
-  if (!d) return;
-  const total = d.n_valid || 1;
-  const slots = ['车型', '城市', '时间', '姓氏'];
-  const html = slots.map((name, i) => {{
-    const n = d.slot_pass_in_valid[name] || 0;
-    const pct = (n / total * 100);
-    return `<div class="t2-slot-row">
-      <div class="label">第 ${{i+1}} 关 ${{name}}</div>
-      <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%;"></div></div>
-      <div class="val"><b>${{n}}</b> / ${{total}} · ${{pct.toFixed(1)}}%</div>
-    </div>`;
-  }}).join('');
-  document.getElementById('t2-slot-bars').innerHTML = html;
 }}
 
 function renderT2Buckets() {{
   const d = t2CurrentData();
   if (!d) return;
+  // 桶标题里直接写"卡在第 X 关"，让用户秒懂
+  const stuckLabel = lv => lv === 0 ? '卡在 第 1 关 (车型)'
+                        : lv === 1 ? '卡在 第 2 关 (城市)'
+                        : lv === 2 ? '卡在 第 3 关 (时间)'
+                        : lv === 3 ? '卡在 第 4 关 (姓氏)'
+                        : '✓ 全过 (4/4)';
   const html = d.buckets.map(b => {{
-    const title = b.level === 0 ? '0 关 (一关没过)' : `${{b.level}} 关`;
     return `<div class="t2-bucket ${{b.level === t2CurrentBucketLv ? 'active' : ''}}" data-lv="${{b.level}}">
-      <div class="label">${{title}}</div>
+      <div class="label">${{b.level}} 关</div>
       <div class="ct">${{b.count}}</div>
       <div class="pct">${{b.pct_of_valid}}% / 有效会话</div>
-      <div class="meta">
+      <div class="meta" style="font-size: 10px; font-weight: 600; color: var(--text); padding-top: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 6px;">${{stuckLabel(b.level)}}</div>
+      <div class="meta" style="border-top: none; padding-top: 0;">
         平均总轮次 <b>${{b.avg_turns}}</b><br>
         平均用户开口 <b>${{b.avg_real_user_turns}}</b><br>
         平均时长 <b>${{b.avg_duration}}</b> s
@@ -1879,42 +1968,151 @@ function renderT2BucketDetail() {{
   if (!d) return;
   const b = d.buckets.find(x => x.level === t2CurrentBucketLv);
   if (!b) return;
-  document.getElementById('t2-bk-title').textContent = `· ${{b.level}} 关桶 (n=${{b.count}})`;
+  const stuckText = b.level === 4 ? '全过 (没卡住)'
+    : `第 ${{b.level + 1}} 关 (${{['车型','城市','时间','姓氏'][b.level]}})`;
+  document.getElementById('t2-bk-title').textContent =
+    `· ${{b.level}} 关桶 (n=${{b.count}}) · ${{stuckText}}`;
+  document.getElementById('t2-bk-stuck').textContent = stuckText;
 
-  // 槽位填充
-  const slots = ['车型', '城市', '时间', '姓氏'];
-  const totalCt = b.count || 1;
-  document.getElementById('t2-bk-slots').innerHTML = slots.map((name, i) => {{
-    const n = b.slot_fill[name] || 0;
-    const pct = (n / totalCt * 100);
-    return `<div class="t2-slot-row">
-      <div class="label">第 ${{i+1}} 关 ${{name}}</div>
-      <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%;"></div></div>
-      <div class="val"><b>${{n}}</b> / ${{totalCt}} · ${{pct.toFixed(0)}}%</div>
-    </div>`;
-  }}).join('');
-
-  // 0 关原因
+  // 左卡：失败原因分布
+  // 0 关：用启发式原因 (该桶后端就计算过)
+  // 1-3 关：从 LLM 失败画像里取该 pass_n 的 fail_category 聚合
+  // 4 关：成功桶，不展示原因
   const reasonsEl = document.getElementById('t2-bk-reasons');
-  if (b.level !== 0 || !Object.keys(b.reasons || {{}}).length) {{
-    reasonsEl.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px;">仅 0 关桶展示原因分布。</div>';
+  if (b.level === 4) {{
+    reasonsEl.innerHTML = '<div style="color: #047857; font-size: 13px; padding: 12px;">✓ 全过桶不展示失败原因。看右侧"成功 transcript"参考。</div>';
+  }} else if (b.level === 0 && Object.keys(b.reasons || {{}}).length) {{
+    // 0 关用启发式 + LLM 双源对比（如果 LLM 跑完了）
+    const heur = b.reasons || {{}};
+    const heurTotal = Object.values(heur).reduce((s, v) => s + v, 0) || 1;
+    const sorted = Object.entries(heur).sort((a, b) => b[1] - a[1]);
+    let html = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">关键词启发式分类 (本地秒出，看趋势)</div>';
+    html += sorted.map(([name, n]) => {{
+      const pct = (n / heurTotal * 100);
+      return `<div class="t2-reason-row">
+        <div class="label">${{escapeHtml(name)}}</div>
+        <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%;"></div></div>
+        <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
+      </div>`;
+    }}).join('');
+    // 如果有 LLM 结果，追加 LLM fail_category
+    const llmBucketRes = (t2LlmResultsCache || []).filter(r => !r.error && r.pass_n === b.level);
+    if (llmBucketRes.length) {{
+      const cat = {{}};
+      llmBucketRes.forEach(r => {{ const c = r.fail_category || '?'; cat[c] = (cat[c] || 0) + 1; }});
+      const ct = Object.values(cat).reduce((s, v) => s + v, 0) || 1;
+      html += `<div style="font-size:11px;color:var(--muted);margin:12px 0 6px;">LLM 失败类别 (n=${{llmBucketRes.length}})</div>`;
+      html += Object.entries(cat).sort((a,b) => b[1]-a[1]).map(([name, n]) => {{
+        const pct = n / ct * 100;
+        return `<div class="t2-reason-row">
+          <div class="label">${{escapeHtml(name)}}</div>
+          <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%; background: linear-gradient(90deg,#a855f7,#06b6d4);"></div></div>
+          <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
+        </div>`;
+      }}).join('');
+    }}
+    reasonsEl.innerHTML = html;
+  }} else {{
+    // 1-3 关：只看 LLM
+    const llmBucketRes = (t2LlmResultsCache || []).filter(r => !r.error && r.pass_n === b.level);
+    if (!llmBucketRes.length) {{
+      reasonsEl.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px;">等 LLM 失败画像跑完……或该桶样本不足。</div>';
+    }} else {{
+      const cat = {{}};
+      llmBucketRes.forEach(r => {{ const c = r.fail_category || '?'; cat[c] = (cat[c] || 0) + 1; }});
+      const ct = Object.values(cat).reduce((s, v) => s + v, 0) || 1;
+      reasonsEl.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">LLM 判定 (n=${{llmBucketRes.length}}, gpt-5.4)</div>` +
+        Object.entries(cat).sort((a,b) => b[1]-a[1]).map(([name, n]) => {{
+          const pct = n / ct * 100;
+          return `<div class="t2-reason-row">
+            <div class="label">${{escapeHtml(name)}}</div>
+            <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%; background: linear-gradient(90deg,#a855f7,#06b6d4);"></div></div>
+            <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
+          </div>`;
+        }}).join('');
+    }}
+  }}
+
+  // 右卡：典型 transcript 案例
+  renderT2BucketCases(b);
+}}
+
+function renderT2BucketCases(bucket) {{
+  // 从 DATA.rows 取该桶的真实通话（_human + scope filter + _pass_n === level）
+  // _pass_n 没在 rows 里，需要重新算: 用 _structured 字段 OR 按 _full / _full_with_model + _intent?
+  // 简单办法：用 LLM 结果里 call_id 反查；如果没 LLM 结果，用 _structured 严格线性算 pass_n
+  const inScopeRows = scopedRows().filter(r => r._human);
+  // 计算每行的 pass_n（基于 _structured）
+  const passN = (r) => {{
+    const s = r._structured || {{}};
+    const fb = (s['购车品牌'] || '').trim();
+    const fm = (s['购车型号'] || '').trim();
+    const fc = (s['购车城市'] || '').trim();
+    const ft = (s['购车时间'] || '').trim();
+    const fn = (s['购车姓名'] || '').trim();
+    if (!(fb && fm)) return 0;
+    if (!fc) return 1;
+    if (!ft) return 2;
+    if (!fn) return 3;
+    return 4;
+  }};
+  // 找出该桶的有效会话（assistant>=2 OR 客户开口）的样本——这里简化用 _assistant_turns>=2
+  const sub = inScopeRows.filter(r => passN(r) === bucket.level && r._assistant_turns >= 2);
+  if (!sub.length) {{
+    document.getElementById('t2-bk-cases').innerHTML =
+      '<div style="color:var(--muted); font-size:12px; padding:12px;">该桶无典型 transcript 样本。</div>';
     return;
   }}
-  const reasonTotal = Object.values(b.reasons).reduce((s, v) => s + v, 0) || 1;
-  const sorted = Object.entries(b.reasons).sort((a, b) => b[1] - a[1]);
-  reasonsEl.innerHTML = sorted.map(([name, n]) => {{
-    const pct = (n / reasonTotal * 100);
-    return `<div class="t2-reason-row">
-      <div class="label">${{escapeHtml(name)}}</div>
-      <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%;"></div></div>
-      <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
-    </div>`;
+  // 按总轮次降序取 5 通最有内容的
+  sub.sort((a, b) => (b._max_turn || 0) - (a._max_turn || 0));
+  const cases = sub.slice(0, 5);
+
+  // 找出每通对应的 LLM 结果（如果有）
+  const llmByCallId = {{}};
+  (t2LlmResultsCache || []).forEach(r => {{ if (r.call_id) llmByCallId[r.call_id] = r; }});
+
+  document.getElementById('t2-bk-cases').innerHTML = cases.map(r => {{
+    const callId = r['Call ID'] || '';
+    const llm = llmByCallId[callId];
+    const failTurnIdx = llm && llm.fail_turn ? parseInt(llm.fail_turn, 10) : null;
+    // Transcript 字段是渲染过的 "role: content" 多行字符串
+    const lines = (r['Transcript'] || '').split('\\n');
+    // 标记 assistant 出问题那句 (按 assistant 出现的第几次)
+    let aCount = 0;
+    const linesHtml = lines.map(line => {{
+      const isAgent = line.startsWith('assistant');
+      if (isAgent) aCount++;
+      const isFail = (isAgent && failTurnIdx && aCount === failTurnIdx);
+      const cls = isAgent ? 'agent' : 'user';
+      const style = isFail
+        ? 'background: rgba(244,63,94,0.12); color: #b91c1c; border-left: 3px solid #f43f5e; padding-left: 6px; font-weight: 600;'
+        : '';
+      const tag = isFail ? '  ⚠️ LLM 判此句出问题' : '';
+      return `<div class="t2-case-line ${{cls}}" style="${{style}}">${{escapeHtml(line)}}${{tag}}</div>`;
+    }}).join('');
+
+    const llmHint = llm && !llm.error
+      ? `<div style="font-size:11px; color:var(--muted); padding:6px 8px; background:var(--panel-2); border-radius:4px; margin-top:6px;">
+          <b style="color:#b91c1c;">LLM 失败类别:</b> ${{escapeHtml(llm.fail_category || '?')}} · <b>原因:</b> ${{escapeHtml(llm.fail_reason || '-')}}<br>
+          <b>建议:</b> ${{escapeHtml(llm.suggestion || '-')}}
+        </div>` : '';
+
+    return `<details style="border-top: 1px solid var(--border); padding: 6px 8px;">
+      <summary style="cursor: pointer; font-size: 12px;">
+        <code style="background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 10px;">${{callId.slice(-10)}}</code>
+        <span style="color: var(--muted); margin-left: 6px;">${{r['Duration (s)'] || '?'}}s · ${{r._max_turn || '?'}} 轮</span>
+        ${{llm ? `<span style="background: rgba(244,63,94,0.12); color: #b91c1c; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 6px;">A${{llm.fail_turn || '?'}} ${{escapeHtml(llm.fail_category || '')}}</span>` : ''}}
+      </summary>
+      <div style="font-size: 11px; line-height: 1.7; padding: 8px 0; color: var(--text);">
+        ${{linesHtml}}
+      </div>
+      ${{llmHint}}
+    </details>`;
   }}).join('');
 }}
 
 function renderT2All() {{
   renderT2Scope();
-  renderT2SlotBars();
   renderT2Buckets();
   renderT2BucketDetail();
 }}
