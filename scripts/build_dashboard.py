@@ -853,7 +853,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <h2>4 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
+  <h2>4 · Agent 效率画像 <span style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">· 纯统计 · 不调 LLM</span></h2>
+  <p class="section-note">
+    把"客户给了多少机会"和"agent 实际收了多少信息"做对比. 三组指标分别看
+    <b>机会浪费率</b> (客户开过口但 agent 没收到任何信息) · <b>采集效率</b> (全过通话有多快) ·
+    <b>首句开局</b> (客户开局是积极/中性/拒绝/不友善, agent 在每种开局下转化能力).
+  </p>
+
+  <div id="t2-eff-stats" class="stats" style="grid-template-columns: repeat(4, 1fr);"></div>
+
+  <div class="t2-grid" style="margin-top: 8px;">
+    <div class="card">
+      <h3 class="t2-card-title">机会浪费分布 <span style="font-weight:400;color:var(--muted);font-size:11px;">· 用户开口 ≥3 句的通话, 按 pass_n 拆</span></h3>
+      <p class="section-note">浪费 = 客户给了机会但 agent 还是 0 关. 看这一坨里 0 关到底占多少, 以及拿到 1-4 关分别多少.</p>
+      <div id="t2-chart-waste" class="chart" style="height: 280px;"></div>
+    </div>
+    <div class="card">
+      <h3 class="t2-card-title">首句开局 × 通关分布 <span style="font-weight:400;color:var(--muted);font-size:11px;">· 4 类客户开局 × pass_n 堆叠</span></h3>
+      <p class="section-note">看 agent 在不同客户开局下的转化能力. <b>关键问题</b>: 中性开局 (最大头) 里 agent 救回的比例 / 积极开局有没有被聊砸.</p>
+      <div id="t2-chart-firstword" class="chart" style="height: 280px;"></div>
+    </div>
+  </div>
+
+  <h2>5 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
   <p class="section-note">服务端用大模型 (gpt-5.4 / qwen3.6-plus) 逐通分析"agent 在哪一轮出问题 / 客户在哪一轮识破 / 失败类别"。后台跑，每 5 秒自动刷新。</p>
   <div class="card" id="t2-llm-progress-wrap" style="display: none;">
     <div class="progress" style="display: block;">
@@ -880,7 +902,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="t2-chart-fail-cat" class="chart" style="height: 320px;"></div>
   </div>
 
-  <h2>5 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
+  <h2>6 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
   <p class="section-note">
     每行 = 一个失败通话。表格直接显示 Call ID 和 LLM 给的全部判定。
     点击 <b>展开按钮</b> 看完整 transcript。
@@ -1010,6 +1032,7 @@ const chartIds = ['chart-funnel',
                   'chart-duration', 'chart-first-sentence-dur',
                   'chart-field-count', 'chart-field-count-donut',
                   't2-chart-sankey',
+                  't2-chart-waste', 't2-chart-firstword',
                   't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat'];
 const charts = {{}};
 chartIds.forEach(id => {{ charts[id] = echarts.init(document.getElementById(id)); }});
@@ -2163,10 +2186,119 @@ function renderT2BucketCases(bucket) {{
   }}).join('');
 }}
 
+function renderT2Efficiency() {{
+  const d = t2CurrentData();
+  if (!d || !d.efficiency) return;
+  const e = d.efficiency;
+  const o = e.opportunity;
+  const c = e.collection;
+
+  // 4 张关键 KPI 卡
+  const cards = [
+    {{
+      label: '机会浪费率',
+      val: o.n_high_chance ? `${{o.rate}}%` : '—',
+      sub: o.n_high_chance ? `${{o.n_wasted}} / ${{o.n_high_chance}} 通客户开口≥${{o.threshold}}句但 0 关` : '无高机会通话',
+      color: '#f43f5e',
+    }},
+    {{
+      label: '采集效率',
+      val: c.n_full ? c.slots_per_turn.toFixed(2) : '—',
+      sub: c.n_full ? `4 关 / 平均 ${{c.median_turns_full || '?'}} 轮 (中位) · n=${{c.n_full}}` : '无 4 关全过通话',
+      color: '#10b981',
+    }},
+    {{
+      label: '高机会样本',
+      val: o.n_high_chance,
+      sub: `客户开口≥${{o.threshold}}句的通话 (机会大)`,
+      color: '#2563eb',
+    }},
+    {{
+      label: '有效会话',
+      val: e.n_valid,
+      sub: '基数 (剔除首句挂断 + 接通无应答后)',
+      color: '#06b6d4',
+    }},
+  ];
+  document.getElementById('t2-eff-stats').innerHTML = cards.map((k, i) => `
+    <div class="stat" style="background: var(--panel); border-color: var(--border);">
+      <div class="label">${{k.label}}</div>
+      <div class="val" style="color: ${{k.color}};">${{k.val}}</div>
+      <div class="pcts"><div style="font-size: 11px; color: var(--muted);">${{k.sub}}</div></div>
+    </div>`).join('');
+
+  // 机会浪费分布柱: x = pass_n (0..4), y = 该 pass_n 的通话数 (在客户开口≥3句的子集里)
+  const passOrder = [0, 1, 2, 3, 4];
+  const passColors = ['#f43f5e', '#f59e0b', '#eab308', '#06b6d4', '#10b981'];
+  charts['t2-chart-waste'].setOption({{
+    color: passColors,
+    tooltip: tooltipBase({{ trigger: 'axis', axisPointer: {{ type: 'shadow' }} }}),
+    grid: {{ left: 4, right: 8, top: 22, bottom: 32, containLabel: true }},
+    xAxis: Object.assign({{
+      type: 'category',
+      name: 'pass_n', nameGap: 18,
+      data: passOrder.map(n => n === 0 ? '0 关 (浪费)' : `${{n}} 关`),
+    }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: `n=${{o.n_high_chance}}` }}, baseAxis),
+    series: [{{
+      type: 'bar',
+      data: passOrder.map((n, i) => ({{
+        value: o.by_pass_n[n] || 0,
+        itemStyle: {{ color: passColors[i] }},
+      }})),
+      itemStyle: {{ borderRadius: [3,3,0,0] }},
+      label: {{
+        show: true, position: 'top', color: MUTED, fontSize: 10,
+        formatter: p => p.value > 0
+          ? `${{p.value}} (${{(p.value / Math.max(o.n_high_chance, 1) * 100).toFixed(0)}}%)`
+          : '',
+      }},
+    }}],
+  }}, true);
+
+  // 首句开局 × pass_n 堆叠柱
+  const cats = e.first_word;
+  const passN = [0, 1, 2, 3, 4];
+  charts['t2-chart-firstword'].setOption({{
+    color: passColors,
+    tooltip: tooltipBase({{
+      trigger: 'axis', axisPointer: {{ type: 'shadow' }},
+      formatter: params => {{
+        if (!params.length) return '';
+        const c = cats[params[0].dataIndex];
+        let html = `<b>${{c.category}}</b> (n=${{c.count}})<br>`;
+        params.forEach(p => {{
+          if (p.value > 0) {{
+            const pct = (p.value / Math.max(c.count, 1) * 100).toFixed(1);
+            html += `${{p.marker}} ${{p.seriesName}}: <b>${{p.value}}</b> (${{pct}}%)<br>`;
+          }}
+        }});
+        return html;
+      }},
+    }}),
+    legend: {{ top: 6, textStyle: {{ color: TEXT, fontSize: 11 }} }},
+    grid: {{ left: 4, right: 8, top: 36, bottom: 32, containLabel: true }},
+    xAxis: Object.assign({{
+      type: 'category',
+      data: cats.map(c => `${{c.category}}\\n(n=${{c.count}})`),
+      axisLabel: {{ color: MUTED, fontSize: 11, lineHeight: 14 }},
+    }}, baseAxis),
+    yAxis: Object.assign({{ type: 'value', name: '通话数' }}, baseAxis),
+    series: passN.map(n => ({{
+      name: `${{n}} 关`,
+      type: 'bar',
+      stack: 'firstword',
+      data: cats.map(c => c.by_pass_n[n] || 0),
+      itemStyle: {{ borderRadius: n === 4 ? [3,3,0,0] : [0,0,0,0] }},
+    }})),
+  }}, true);
+}}
+
 function renderT2All() {{
   renderT2Scope();
   renderT2Buckets();
   renderT2BucketDetail();
+  renderT2Efficiency();
 }}
 
 // ── Tab 切换 ──
@@ -2178,7 +2310,15 @@ document.querySelectorAll('.tab-btn').forEach(btn => {{
     const tabId = 'tab-' + btn.dataset.tab;
     document.getElementById(tabId).classList.add('active');
     document.getElementById('tab1-controls').style.display = btn.dataset.tab === 'overview' ? '' : 'none';
-    setTimeout(() => Object.values(charts).forEach(c => c.resize()), 50);
+    // ECharts 在 hidden 容器里 init 时 canvas 是 0×0, setOption 写入数据后也不渲染.
+    // 切 tab 显式让它 resize + 重新调用 render 函数让 setOption 在正确 canvas 上重画.
+    setTimeout(() => {{
+      Object.values(charts).forEach(c => c.resize());
+      if (btn.dataset.tab === 'agent' && T2) {{
+        renderT2All();
+        renderT2LlmCharts();
+      }}
+    }}, 60);
   }});
 }});
 

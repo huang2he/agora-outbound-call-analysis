@@ -101,6 +101,53 @@ def total_turn_count(transcript: list[dict]) -> int:
     return sum(1 for t in transcript if t.get("role") in ("assistant", "user"))
 
 
+def max_turn_id(transcript: list[dict]) -> int:
+    ids = [t.get("turn_id") for t in transcript if isinstance(t.get("turn_id"), int)]
+    return max(ids) if ids else 0
+
+
+# ──────── 客户首句开局分类 (启发式) ─────────
+# 看客户第 1 个"真实 user turn"的 content 关键词
+FIRST_WORD_CATEGORIES = [
+    # (category_name, [keyword, ...]) - 顺序优先
+    ("积极线索", [
+        "想买", "考虑", "考虑买", "正在看", "想看", "在看", "打算买", "准备买",
+        "什么车", "什么型号", "什么品牌", "多少钱", "什么价",
+        # 主流品牌：客户主动提名一般是积极信号
+        "宝马", "奔驰", "奥迪", "丰田", "本田", "大众", "比亚迪", "理想", "蔚来",
+        "小鹏", "特斯拉", "保时捷", "雷克萨斯", "凯迪拉克", "沃尔沃", "捷豹", "路虎",
+        "卡宴", "极氪", "红旗", "长安", "吉利", "五菱", "哈弗", "传祺", "迈巴赫",
+    ]),
+    ("不友善", [
+        "操", "傻逼", "滚", "妈了个", "草泥", "去你", "煞笔",
+    ]),
+    ("怀疑拒绝", [
+        "不需要", "不买", "不考虑", "已经买", "买好了", "不想", "不感兴趣",
+        "别打了", "别再打", "没钱", "没意向", "没空", "没时间",
+        "你哪位", "哪里", "你谁", "你是谁", "什么公司", "怎么知道", "诈骗", "骚扰",
+    ]),
+]
+
+
+def classify_first_word(transcript: list[dict]) -> str:
+    """看客户第一个真实 user turn 的内容关键词，返回首句开局类别。
+
+    返回: '积极线索' / '怀疑拒绝' / '不友善' / '中性问询' (默认)
+    """
+    if not transcript:
+        return "中性问询"
+    for t in transcript:
+        if not is_real_user_turn(t):
+            continue
+        content = str(t.get("content") or "")
+        # 顺序优先匹配
+        for cat, kws in FIRST_WORD_CATEGORIES:
+            if any(kw in content for kw in kws):
+                return cat
+        return "中性问询"
+    return "中性问询"
+
+
 # ────────────────────────── 工具函数 ──────────────────────────
 
 def parse_structured_output(raw: Any) -> dict[str, Any]:
@@ -197,6 +244,106 @@ def classify_zero_pass_reason(transcript: list[dict]) -> str:
 
 # ─────────────────────── 主入口：Tab 2 数据计算 ───────────────────────
 
+def compute_efficiency_metrics(df: pd.DataFrame) -> dict:
+    """三类 agent-视角效率画像 (纯统计, 不调 LLM):
+
+    1. 机会浪费率 (Opportunity Waste Rate):
+       客户在通话里至少开口了 N 句, 但 agent 一关都没问到的占比.
+       这是 agent "把握对话机会" 的能力衡量.
+       N = 3 (默认门槛).
+
+    2. 槽位采集效率 (Slot Collection Efficiency):
+       4 关全过的通话里, 4 (槽位) / max_turn_id 的均值.
+       数字越高 = agent 越快收齐 4 关 (短平快).
+
+    3. 首句开局画像 (First-Word Profile):
+       按客户第 1 个真实发言的关键词分 4 类, 看 agent 在每种开局下
+       的通过分布. 区分 "agent 把好开局聊砸了" vs "agent 把烂开局救回来了".
+
+    所有指标都在 "有效会话" 范围内计算 (排除首句挂断 + 接通无应答).
+    输入 df 需要预先做过 _human / _valid / _real_user_turns / _pass_n / _max_turn /
+    _transcript 等标注 (见 compute_tab2_data 里的预处理).
+    """
+    valid = df[df["_valid"]]
+    n_valid = len(valid)
+    if n_valid == 0:
+        return {
+            "n_valid": 0,
+            "opportunity": {"threshold": 3, "n_high_chance": 0, "n_wasted": 0, "rate": 0.0},
+            "collection": {"n_full": 0, "slots_per_turn": 0.0, "median_turns_full": 0},
+            "first_word": [],
+        }
+
+    # ── 1. 机会浪费率 ───────────────────────────────
+    OPPORTUNITY_THRESHOLD = 3
+    high_chance = valid[valid["_real_user_turns"] >= OPPORTUNITY_THRESHOLD]
+    n_high = len(high_chance)
+    n_wasted = int((high_chance["_pass_n"] == 0).sum())
+    opportunity = {
+        "threshold": OPPORTUNITY_THRESHOLD,
+        "n_high_chance": n_high,
+        "n_wasted": n_wasted,
+        "rate": round(n_wasted / n_high * 100, 1) if n_high else 0.0,
+        # 给个 by-pass-n 细分: 客户开口 ≥3 句的通话里, pass_n 怎么分布
+        "by_pass_n": {
+            i: int((high_chance["_pass_n"] == i).sum()) for i in range(5)
+        },
+    }
+
+    # ── 2. 槽位采集效率 ────────────────────────────
+    full_calls = valid[valid["_pass_n"] == 4]
+    n_full = len(full_calls)
+    if n_full:
+        # 4 / max_turn_id, 然后取均值
+        full_turns = full_calls["_max_turn"].clip(lower=1)
+        slots_per_turn_series = 4 / full_turns
+        slots_per_turn = round(float(slots_per_turn_series.mean()), 3)
+        median_turns = int(full_turns.median())
+        # 全过通话里 max_turn 最小的 5 通 (最高效的通)
+        top_eff = full_calls.nsmallest(5, "_max_turn")
+        top_eff_calls = top_eff["Call ID"].tolist() if "Call ID" in top_eff.columns else []
+    else:
+        slots_per_turn = 0.0
+        median_turns = 0
+        top_eff_calls = []
+    collection = {
+        "n_full": n_full,
+        "slots_per_turn": slots_per_turn,
+        "median_turns_full": median_turns,
+        "top_efficient_call_ids": top_eff_calls,
+    }
+
+    # ── 3. 首句开局画像 ────────────────────────────
+    fw_rows = []
+    categories = ["积极线索", "中性问询", "怀疑拒绝", "不友善"]
+    fw_classify = valid["_transcript"].apply(classify_first_word)
+    for cat in categories:
+        sub = valid[fw_classify == cat]
+        cnt = len(sub)
+        if cnt == 0:
+            fw_rows.append({"category": cat, "count": 0, "pct": 0.0, "by_pass_n": {i: 0 for i in range(5)},
+                            "pass_rate": 0.0, "avg_pass_n": 0.0})
+            continue
+        by_pn = {i: int((sub["_pass_n"] == i).sum()) for i in range(5)}
+        pass_rate = (cnt - by_pn[0]) / cnt * 100   # 至少过 1 关的比例
+        avg_pn = float(sub["_pass_n"].mean())
+        fw_rows.append({
+            "category": cat,
+            "count": cnt,
+            "pct": round(cnt / n_valid * 100, 1),
+            "by_pass_n": by_pn,
+            "pass_rate": round(pass_rate, 1),
+            "avg_pass_n": round(avg_pn, 2),
+        })
+
+    return {
+        "n_valid": n_valid,
+        "opportunity": opportunity,
+        "collection": collection,
+        "first_word": fw_rows,
+    }
+
+
 def compute_tab2_data(df: pd.DataFrame) -> dict:
     """整张 Tab 2 的数据后端入口。
 
@@ -233,12 +380,19 @@ def compute_tab2_data(df: pd.DataFrame) -> dict:
     work["_valid"] = work["_human"] & (work["_real_user_turns"] >= 1)
     work["_pass_n"] = work["_structured"].apply(passed_levels_count)
     work["_total_turns"] = work["_transcript"].apply(total_turn_count)
+    work["_max_turn"] = work["_transcript"].apply(max_turn_id)
     work["Duration (seconds)"] = pd.to_numeric(work["Duration (seconds)"], errors="coerce").fillna(0)
 
     return {
-        "global": _bucket_breakdown(work, label="全部"),
+        "global": {
+            **_bucket_breakdown(work, label="全部"),
+            "efficiency": compute_efficiency_metrics(work),
+        },
         "agents": [
-            _bucket_breakdown(sub, label=name)
+            {
+                **_bucket_breakdown(sub, label=name),
+                "efficiency": compute_efficiency_metrics(sub),
+            }
             for name, sub in work.groupby("Agent Name")
         ],
         "level_fields": {
