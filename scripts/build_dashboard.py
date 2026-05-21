@@ -802,26 +802,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<div class="section-row">
-  <h2 style="margin: 0;">2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 散点 · 默认折叠</span></h2>
-  <button id="scatter-toggle" type="button"
-    style="margin-left:12px; background: var(--panel); color: var(--muted); border: 1px solid var(--border);
-           font: inherit; font-size: 11px; padding: 4px 12px; cursor: pointer; border-radius: 4px;">
-    展开 ▾
-  </button>
-</div>
-<div id="scatter-wrap" style="display:none;">
-  <p class="section-note">
-    Basic Scatter: 每个点 = 一个<b>带车型完整成单</b>。X = BJT 成单时间, Y = 通话时长 (秒).
-    两个 agent 共用同一对 XY 轴, 用<b>不同颜色</b>区分。<b>悬浮看每单完整 Structured Output</b> + 下载录音。
-  </p>
-  <div class="card">
-    <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
-  </div>
-</div>
-
-<div class="section-row" style="margin-top: 18px; flex-wrap: wrap; gap: 8px;">
-  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
+<div class="section-row" style="margin-top: 0; flex-wrap: wrap; gap: 8px;">
+  <h2 style="margin: 0;">2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
   <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
     <button data-bucket="10" class="active">10 分钟</button>
     <button data-bucket="20">20 分钟</button>
@@ -840,7 +822,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="conv-cart-cell-detail" style="font-size: 12px; color: var(--muted); padding: 6px 4px 0; min-height: 18px;"></div>
 </div>
 
-<h2>4 · 成单真实性校验 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· LLM 模块 · 异步加载</span><span id="conv-verify-status" style="margin-left:10px; font-weight:400; font-size:11px; color: var(--muted);">等待加载…</span></h2>
+<h2>3 · 成单真实性校验 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· LLM 模块 · 异步加载</span><span id="conv-verify-status" style="margin-left:10px; font-weight:400; font-size:11px; color: var(--muted);">等待加载…</span></h2>
 <p class="section-note">
   对所有"带车型完整转换"做大模型质检, 判断 Structured Output 是<b>客户主动提供 (real) / 客户敷衍 agent 推断 (suspect) / 明确造假 (fake)</b>。
   此 section 异步加载, 不影响上面的统计图渲染速度。
@@ -861,7 +843,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="verify-table-wrap"></div>
 </div>
 
-<h2>5 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>4 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号）。三张图分别看每个子集的轮次构成，左边柱状（绝对数量），右边环形（每根柱子在该子集里的占比）。</p>
 
 <div class="turn-card">
@@ -886,11 +868,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>6 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
+<h2>5 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>7 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>6 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：4 个槽位 — <b>车型</b> (购车品牌 或 购车型号 任一非 null) · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
@@ -900,7 +882,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 <div class="card" id="full-conv-drill" style="margin-top:8px;"></div>
 
-<h2>8 · 早期挂断（真人接听内 · 互斥分桶）</h2>
+<h2>7 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
   <div class="card">
     <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
@@ -1176,7 +1158,6 @@ const chartIds = ['chart-funnel',
                   'chart-turn-intent','chart-turn-intent-donut',
                   'chart-duration', 'chart-first-sentence-dur',
                   'chart-field-count', 'chart-field-count-donut',
-                  'chart-conv-heatmap',
                   'chart-conv-cart-heat',
                   't2-chart-sankey',
                   't2-chart-waste', 't2-chart-firstword',
@@ -1970,7 +1951,6 @@ function render(key) {{
   renderFullConversionDrill(d.full_conversion_drill);
   renderEarlyHangupTable(d.early_hangup);
   renderFirstSentenceDur();
-  renderConvHeatmap(key);
   renderConvCartHeat(key);
 }}
 
@@ -2170,118 +2150,6 @@ function renderConvCartHeat(key) {{
   }});
 }}
 
-// ── 成单热力图 / 散点 (Tab 1 Section 2) ──
-// Basic Scatter: 两个 agent 共用 XY 轴, 不同颜色区分;
-// X = BJT 时间 (time 轴), Y = 通话时长 (秒). 每个点 = 一个带车型成单.
-function renderConvHeatmap(key) {{
-  const all = DATA.conversions || [];
-  const conv = (key === DATA.all_key) ? all : all.filter(c => c.agent === key);
-  const chart = charts['chart-conv-heatmap'];
-  if (!conv.length) {{
-    chart.clear();
-    chart.setOption({{
-      title: {{ text: '当前 scope 无带车型完整转换', left: 'center', top: 'middle',
-                textStyle: {{ color: MUTED, fontSize: 13 }} }},
-    }});
-    return;
-  }}
-  const AGENT_COLORS = ['#2563eb', '#f59e0b', '#10b981', '#a855f7', '#06b6d4', '#f43f5e'];
-  const agents = [...new Set(all.map(c => c.agent))].sort();  // 全 scope agent 顺序 (颜色稳定)
-  const visibleAgents = (key === DATA.all_key) ? agents : [key];
-
-  const allMs = conv.map(c => c.bjt_ms).filter(Boolean);
-  if (!allMs.length) {{
-    chart.clear();
-    chart.setOption({{ title: {{ text: '成单缺失时间戳, 无法绘制', left:'center', top:'middle', textStyle:{{color: MUTED, fontSize: 13}} }} }});
-    return;
-  }}
-
-  // tooltip: 当前 hover 的单个成单完整 SO
-  const tipFormatter = params => {{
-    const p = params;
-    const c = p.data && p.data.conv;
-    if (!c) return '';
-    const s = c.structured || {{}};
-    const ai = agents.indexOf(c.agent);
-    const color = AGENT_COLORS[ai % AGENT_COLORS.length];
-    const aShort = c.agent.length > 28 ? c.agent.slice(0, 26) + '…' : c.agent;
-    const brand = s['购车品牌'] || '';
-    const model = s['购车型号'] || '';
-    const city = s['购车城市'] || '';
-    const buyTime = s['购车时间'] || '';
-    const name = s['购车姓名'] || '';
-    const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="color:#2563eb;text-decoration:none;">⬇ 下载录音</a>` : '<span style="color:#94a3b8;">无录音 URL</span>';
-    return `<div style="line-height:1.5;">
-      <span style="display:inline-block;width:8px;height:8px;background:${{color}};border-radius:50%;margin-right:6px;"></span>
-      <b>${{aShort}}</b>
-      <div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>
-      <span style="color:#0f172a;font-weight:600;">${{(c.bjt||'').slice(0,19)}}</span>
-      <span style="color:#64748b;font-size:11px;"> · 时长 ${{c.duration_s}}s</span><br>
-      <span style="color:${{color}};font-size:13px;">${{brand}} ${{model}}</span>
-      ${{city ? `<span style="color:#64748b;"> · ${{city}}</span>` : ''}}
-      ${{buyTime ? `<span style="color:#64748b;"> · ${{buyTime}}</span>` : ''}}
-      ${{name ? ` · <b>${{name}}</b>` : ''}}
-      <br><code style="font-size:10px;color:#94a3b8;">${{(c.call_id||'').slice(-12)}}</code>
-      <div style="margin-top:6px;font-size:12px;">${{audio}}</div>
-    </div>`;
-  }};
-
-  // 每个 agent 一个 series, 数据是 [&#123;value: [ms, duration_s], conv: c&#125;]
-  const series = visibleAgents.map(a => {{
-    const ai = agents.indexOf(a);
-    const color = AGENT_COLORS[ai % AGENT_COLORS.length];
-    const aShort = a.length > 28 ? a.slice(0, 26) + '…' : a;
-    return {{
-      name: aShort,
-      type: 'scatter',
-      symbolSize: 12,
-      itemStyle: {{ color, opacity: 0.78, borderColor: '#fff', borderWidth: 1 }},
-      emphasis: {{ scale: 1.6, itemStyle: {{ opacity: 1, shadowBlur: 8, shadowColor: color }} }},
-      data: conv.filter(c => c.agent === a && c.bjt_ms).map(c => ({{
-        value: [c.bjt_ms, c.duration_s],
-        conv: c,
-      }})),
-    }};
-  }});
-
-  chart.setOption({{
-    color: AGENT_COLORS,
-    legend: {{
-      top: 0, left: 'center',
-      data: visibleAgents.map(a => a.length > 28 ? a.slice(0,26)+'…' : a),
-      itemWidth: 10, itemHeight: 10, textStyle: {{ color: MUTED, fontSize: 11 }},
-    }},
-    tooltip: tooltipBase({{
-      trigger: 'item',
-      formatter: tipFormatter,
-      enterable: true,
-      extraCssText: 'max-width: 360px;',
-    }}),
-    grid: {{ left: 8, right: 24, top: 32, bottom: 48, containLabel: true }},
-    xAxis: {{
-      type: 'time', name: 'BJT 成单时间', nameLocation: 'middle', nameGap: 30,
-      axisLabel: {{
-        color: MUTED, fontSize: 10, hideOverlap: true,
-        formatter: v => {{
-          const d = new Date(v);
-          return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-        }},
-      }},
-      axisLine: {{ lineStyle: {{ color: BORDER }} }},
-      axisTick: {{ show: true, lineStyle: {{ color: BORDER }} }},
-      splitLine: {{ show: false }},
-    }},
-    yAxis: {{
-      type: 'value', name: '通话时长 (秒)', nameLocation: 'middle', nameGap: 36,
-      min: 0,
-      axisLabel: {{ color: MUTED, fontSize: 10 }},
-      axisLine: {{ show: false }},
-      axisTick: {{ show: false }},
-      splitLine: {{ lineStyle: {{ color: BORDER, type: 'dashed' }} }},
-    }},
-    series,
-  }}, true);
-}}
 
 const sel = document.getElementById('agent-select');
 sel.addEventListener('change', e => {{ currentAgentKey = e.target.value; render(e.target.value); }});
@@ -2349,19 +2217,6 @@ document.getElementById('conv-cart-bucket-toggle').addEventListener('click', e =
     b.classList.toggle('active', parseInt(b.getAttribute('data-bucket'),10) === m);
   }});
   renderConvCartHeat(currentAgentKey);
-}});
-
-// Section 2 散点折叠 / 展开
-document.getElementById('scatter-toggle').addEventListener('click', () => {{
-  const w = document.getElementById('scatter-wrap');
-  const btn = document.getElementById('scatter-toggle');
-  const open = w.style.display === 'none' || !w.style.display;
-  w.style.display = open ? '' : 'none';
-  btn.textContent = open ? '收起 ▴' : '展开 ▾';
-  // 容器从 0×0 撑开后, ECharts canvas 也要 resize 才会重画
-  if (open) {{
-    setTimeout(() => {{ charts['chart-conv-heatmap'] && charts['chart-conv-heatmap'].resize(); }}, 40);
-  }}
 }});
 
 // 成单热力图 v2 (cartesian) metric (成单数 / 成单比例) 切换
