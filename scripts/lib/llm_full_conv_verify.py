@@ -22,20 +22,49 @@ from typing import Any
 
 # ── Prompt ────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是销售质检专家. 任务: 判断一通已经 "带车型完整转换" 的通话, 它的最终 Structured Output 是不是从客户口中真实采集的, 还是 agent 自己脑补/客户敷衍乱说.
+SYSTEM_PROMPT = """你是销售质检专家. 业务: AI 外呼销售收集 4 个槽位 + 意向, 系统已标"带车型完整转换"(品牌+型号+城市+时间+姓名 都填了).
 
-业务背景: AI 外呼销售收集 4 个槽位 (品牌 + 车型 / 城市 / 购车时间 / 姓氏). 这通是被系统标"带车型完整转换"(4 槽都填了, 且型号槽不空). 现在要判它是不是真有效线索.
+任务: 重新基于 transcript 提取 *客户真实表达* 的 SO (new_so), 然后跟系统记录的旧 SO (old_so) 做字段级对比.
 
-判定规则:
-- real (真实): 客户主动 / 明确给出了对应信息, 至少 3 个槽位能在 transcript 找到清晰来源, 客户态度配合.
-- suspect (可疑): 客户态度敷衍 / 反复改口 / 用模糊词("随便""都行""你说呢")回答 / 或客户根本没说但 agent 推断填入了某个字段. 不算明显假, 但价值很低.
-- fake (假): 客户明确说"不要""不买""挂电话"或对话基本没有客户参与, 但 SO 仍然标成 4 槽全填. 几乎一定不是真线索.
+6 个槽位:
+  购车品牌 / 购车型号 / 购车城市 / 购车时间 / 购车姓名 / 购车意向
+
+提取 new_so 的原则:
+  - 只填能在 transcript 找到清晰证据的内容. 没听清 / 客户没说 / 客户敷衍 → 填 null.
+  - 客户用模糊词 ("随便" "都行" "看看") 不算明确表达, 应填 null.
+  - 客户多次改口的话, 以最后明确表达为准.
+
+字段级 diff 4 类:
+  match              - 新旧值一致 (含都为 null)
+  mismatch           - 新旧都有值但不同 (agent 误听 / 推断错)
+  filled_no_evidence - 旧 SO 有值但 transcript 找不到任何证据 (agent 凭空填)
+  missing_should_have- 旧 SO 是 null 但 transcript 客户有清晰表达 (agent 漏填)
+
+整体 verdict:
+  real    - 全部 6 字段 diff 都是 match, 且至少 3 个 match 非 null, 客户态度配合
+  suspect - 出现至少 1 个 mismatch 或 filled_no_evidence, 但客户态度不算敌对
+  fake    - 客户明确拒绝/挂断/没参与对话, 但 SO 仍标 4 槽全填
 
 只返回 JSON, 不要加 markdown 围栏:
 {
+  "new_so": {
+    "购车品牌": "<值或null>",
+    "购车型号": "<值或null>",
+    "购车城市": "<值或null>",
+    "购车时间": "<值或null>",
+    "购车姓名": "<值或null>",
+    "购车意向": "是 | 否 | null"
+  },
+  "diff": {
+    "购车品牌": "match | mismatch | filled_no_evidence | missing_should_have",
+    "购车型号": "...",
+    "购车城市": "...",
+    "购车时间": "...",
+    "购车姓名": "...",
+    "购车意向": "..."
+  },
   "verdict": "real | suspect | fake",
-  "reason": "<≤30 字 中文, 关键依据>",
-  "evidence_turn": <int 或 null, 让你判断的最关键 user turn 序号 (1-based, 从真实 user turn 数起), 没有就 null>
+  "reason": "<≤30 字 中文, 关键依据>"
 }
 """
 

@@ -3048,6 +3048,7 @@ function renderConvVerifyReport(d) {{
 // 渲染单个成单的 Structured Output: 全部 6 个字段, 每个字段独立 label
 // 空值显示为灰色横线 (—), 让缺失也能一眼看出.
 function soFieldsHtml(s) {{
+  // 老版: 单一 SO 显示 (Section 3 tooltip 等地方仍用)
   if (!s) return '<span style="color:#94a3b8;">—</span>';
   const fields = ['购车品牌', '购车型号', '购车城市', '购车时间', '购车姓名', '购车意向'];
   return fields.map(k => {{
@@ -3058,6 +3059,40 @@ function soFieldsHtml(s) {{
       : `<b>${{escapeHtml(String(v))}}</b>`;
     return `<div style="line-height:1.5;">
       <span style="color:#94a3b8; font-size:10px; display:inline-block; min-width:60px;">${{k}}:</span> ${{valHtml}}
+    </div>`;
+  }}).join('');
+}}
+
+// Section 4 校验表用: 同时显示原 SO / 新 SO / diff 标签
+function fmtVal(v) {{
+  const empty = v === null || v === undefined || String(v).trim() === '' || String(v).trim().toLowerCase() === 'null';
+  return empty ? '<span style="color:#cbd5e1;">—</span>' : `<b>${{escapeHtml(String(v))}}</b>`;
+}}
+function diffChip(d) {{
+  const map = {{
+    match:               {{ label: '一致', bg: '#d1fae5', fg: '#047857' }},
+    mismatch:            {{ label: '不符', bg: '#fee2e2', fg: '#b91c1c' }},
+    filled_no_evidence:  {{ label: '凭空填', bg: '#fef3c7', fg: '#b45309' }},
+    missing_should_have: {{ label: '漏填', bg: '#fef3c7', fg: '#b45309' }},
+  }};
+  const c = map[d];
+  if (!c) return '';
+  return `<span style="background:${{c.bg}};color:${{c.fg}};padding:0 5px;border-radius:8px;font-size:9px;font-weight:600;margin-left:4px;">${{c.label}}</span>`;
+}}
+function soDiffHtml(oldSo, newSo, diff) {{
+  const fields = ['购车品牌', '购车型号', '购车城市', '购车时间', '购车姓名', '购车意向'];
+  oldSo = oldSo || {{}};
+  newSo = newSo || {{}};
+  diff  = diff  || {{}};
+  return fields.map(k => {{
+    const dchip = diffChip(diff[k]);
+    const rowBg = (diff[k] && diff[k] !== 'match') ? 'background: rgba(254,243,199,0.35);' : '';
+    return `<div style="line-height:1.5;padding:2px 4px;border-radius:3px;${{rowBg}}">
+      <div style="font-size:10px;color:#94a3b8;">${{k}} ${{dchip}}</div>
+      <div style="display:grid;grid-template-columns: 1fr 1fr;gap:4px;font-size:11px;">
+        <div><span style="color:#94a3b8;font-size:9px;">原</span> ${{fmtVal(oldSo[k])}}</div>
+        <div><span style="color:#2563eb;font-size:9px;">新</span> ${{fmtVal(newSo[k])}}</div>
+      </div>
     </div>`;
   }}).join('');
 }}
@@ -3097,7 +3132,7 @@ function renderConvVerifyTable() {{
       <td style="color:#0f172a;">${{escapeHtml(r.reason||'-')}}</td>
       <td style="color:#64748b;">${{(c.bjt||'').slice(11, 19) || '-'}}</td>
       <td style="color:#64748b;">${{escapeHtml(ag)}}</td>
-      <td>${{soFieldsHtml(s)}}</td>
+      <td>${{soDiffHtml(s, r.new_so, r.diff)}}</td>
       <td><code style="background:var(--panel-2);padding:1px 4px;border-radius:3px;font-size:10px;">${{(r.call_id||'').slice(-10)}}</code></td>
       <td>${{audio}}</td>
     </tr>`;
@@ -3107,10 +3142,10 @@ function renderConvVerifyTable() {{
     <table class="verify-table">
       <thead><tr>
         <th style="width:60px;">判定</th>
-        <th>依据</th>
-        <th style="width:70px;">时间</th>
-        <th style="width:170px;">Agent</th>
-        <th>SO 内容</th>
+        <th style="width:200px;">依据</th>
+        <th style="width:60px;">时间</th>
+        <th style="width:140px;">Agent</th>
+        <th>SO 原 vs 新 (LLM 重提取)</th>
         <th style="width:90px;">Call ID</th>
         <th style="width:60px;">录音</th>
       </tr></thead>
