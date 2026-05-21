@@ -775,10 +775,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 带车型完整转换 · 1 分钟时段 · agent 不同色叠加</span></h2>
+<h2>2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 带车型完整转换 · 散点 · agent 不同色</span></h2>
 <p class="section-note">
-  X = BJT 1 分钟时段, Y = 该分钟成单数。两个 agent 共用同一对坐标轴, 用<b>不同颜色叠柱</b>区分,
-  直观比较同时段 prompt 老/新版的成单能力。<b>悬浮看每单完整 Structured Output</b> (车型/城市/购车时间/姓氏)。
+  Basic Scatter: 每个点 = 一个<b>带车型完整成单</b>。X = BJT 成单时间, Y = 通话时长 (秒).
+  两个 agent 共用同一对 XY 轴, 用<b>不同颜色</b>区分。<b>悬浮看每单完整 Structured Output</b> (品牌/型号/城市/购车时间/姓)。
 </p>
 <div class="card">
   <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
@@ -1878,9 +1878,9 @@ function render(key) {{
   renderConvHeatmap(key);
 }}
 
-// ── 成单热力图 (Tab 1 Section 2) ──
-// 两个 agent 共用 XY 轴, 用不同颜色区分; X = 1 分钟时段, Y = 该时段成单数,
-// stacked bar 形式叠柱比较 agent 的成单时间分布.
+// ── 成单热力图 / 散点 (Tab 1 Section 2) ──
+// Basic Scatter: 两个 agent 共用 XY 轴, 不同颜色区分;
+// X = BJT 时间 (time 轴), Y = 通话时长 (秒). 每个点 = 一个带车型成单.
 function renderConvHeatmap(key) {{
   const all = DATA.conversions || [];
   const conv = (key === DATA.all_key) ? all : all.filter(c => c.agent === key);
@@ -1893,9 +1893,6 @@ function renderConvHeatmap(key) {{
     }});
     return;
   }}
-  const BUCKET_MS = 60 * 1000;
-  const bucketStart = ms => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
-  // 颜色：第 1 个 agent 蓝 / 第 2 个橙 (后续 agent 用 ECharts 默认调色板)
   const AGENT_COLORS = ['#2563eb', '#f59e0b', '#10b981', '#a855f7', '#06b6d4', '#f43f5e'];
   const agents = [...new Set(all.map(c => c.agent))].sort();  // 全 scope agent 顺序 (颜色稳定)
   const visibleAgents = (key === DATA.all_key) ? agents : [key];
@@ -1906,78 +1903,50 @@ function renderConvHeatmap(key) {{
     chart.setOption({{ title: {{ text: '成单缺失时间戳, 无法绘制', left:'center', top:'middle', textStyle:{{color: MUTED, fontSize: 13}} }} }});
     return;
   }}
-  const minMs = bucketStart(Math.min(...allMs));
-  const maxMs = bucketStart(Math.max(...allMs));
-  const buckets = [];
-  for (let m = minMs; m <= maxMs; m += BUCKET_MS) buckets.push(m);
-  const bucketLabel = ms => {{
-    const d = new Date(ms);
-    return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
-  }};
-  const xLabels = buckets.map(bucketLabel);
 
-  // agent → bucketIdx → list[conv]
-  const agentBucket = {{}};
-  visibleAgents.forEach(a => {{
-    agentBucket[a] = buckets.map(() => []);
-  }});
-  conv.forEach(c => {{
-    if (!c.bjt_ms) return;
-    const bi = buckets.indexOf(bucketStart(c.bjt_ms));
-    if (bi < 0 || !agentBucket[c.agent]) return;
-    agentBucket[c.agent][bi].push(c);
-  }});
-
-  // tooltip: 当前 hover 的 cell + 其余同 X 列其他 agent
+  // tooltip: 当前 hover 的单个成单完整 SO
   const tipFormatter = params => {{
-    if (!params.length) return '';
-    const bi = params[0].dataIndex;
-    const head = `<b>${{xLabels[bi]}} – ${{bucketLabel(buckets[bi] + BUCKET_MS)}}</b>`
-               + `<div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>`;
-    const sections = visibleAgents.map(a => {{
-      const list = agentBucket[a][bi] || [];
-      if (!list.length) return '';
-      const ai = agents.indexOf(a);
-      const color = AGENT_COLORS[ai % AGENT_COLORS.length];
-      const aShort = a.length > 24 ? a.slice(0, 22) + '…' : a;
-      const items = list.slice(0, 6).map(c => {{
-        const s = c.structured || {{}};
-        const time = (c.bjt || '').slice(11, 19);
-        const brand = s['购车品牌'] || '';
-        const model = s['购车型号'] || '';
-        const city = s['购车城市'] || '';
-        const buyTime = s['购车时间'] || '';
-        const name = s['购车姓名'] || '';
-        return `<div style="margin:3px 0 3px 8px; line-height:1.4;">
-          <span style="color:#0f172a;font-weight:600;">${{time}}</span>
-          <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span><br>
-          <span style="margin-left:8px;color:${{color}};">${{brand}} ${{model}}</span>
-          ${{city ? `<span style="color:#64748b;"> · ${{city}}</span>` : ''}}
-          ${{buyTime ? `<span style="color:#64748b;"> · ${{buyTime}}</span>` : ''}}
-          ${{name ? `· <b>${{name}}</b>` : ''}}
-          <br><code style="margin-left:8px;font-size:10px;color:#94a3b8;">${{(c.call_id||'').slice(-12)}}</code>
-        </div>`;
-      }}).join('');
-      const more = list.length > 6 ? `<div style="margin-left:8px;color:#94a3b8;font-size:11px;">... 还有 ${{list.length - 6}} 个</div>` : '';
-      return `<div style="margin-top:4px;">
-        <span style="display:inline-block;width:8px;height:8px;background:${{color}};border-radius:2px;margin-right:6px;"></span>
-        <b>${{aShort}}</b> · ${{list.length}} 单${{items}}${{more}}</div>`;
-    }}).filter(Boolean).join('');
-    return head + (sections || '<div style="color:#94a3b8;font-size:11px;">该分钟无成单</div>');
+    const p = params;
+    const c = p.data && p.data.conv;
+    if (!c) return '';
+    const s = c.structured || {{}};
+    const ai = agents.indexOf(c.agent);
+    const color = AGENT_COLORS[ai % AGENT_COLORS.length];
+    const aShort = c.agent.length > 28 ? c.agent.slice(0, 26) + '…' : c.agent;
+    const brand = s['购车品牌'] || '';
+    const model = s['购车型号'] || '';
+    const city = s['购车城市'] || '';
+    const buyTime = s['购车时间'] || '';
+    const name = s['购车姓名'] || '';
+    return `<div style="line-height:1.5;">
+      <span style="display:inline-block;width:8px;height:8px;background:${{color}};border-radius:50%;margin-right:6px;"></span>
+      <b>${{aShort}}</b>
+      <div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>
+      <span style="color:#0f172a;font-weight:600;">${{(c.bjt||'').slice(0,19)}}</span>
+      <span style="color:#64748b;font-size:11px;"> · 时长 ${{c.duration_s}}s</span><br>
+      <span style="color:${{color}};font-size:13px;">${{brand}} ${{model}}</span>
+      ${{city ? `<span style="color:#64748b;"> · ${{city}}</span>` : ''}}
+      ${{buyTime ? `<span style="color:#64748b;"> · ${{buyTime}}</span>` : ''}}
+      ${{name ? ` · <b>${{name}}</b>` : ''}}
+      <br><code style="font-size:10px;color:#94a3b8;">${{(c.call_id||'').slice(-12)}}</code>
+    </div>`;
   }};
 
-  const series = visibleAgents.map((a, idx) => {{
+  // 每个 agent 一个 series, 数据是 [&#123;value: [ms, duration_s], conv: c&#125;]
+  const series = visibleAgents.map(a => {{
     const ai = agents.indexOf(a);
     const color = AGENT_COLORS[ai % AGENT_COLORS.length];
     const aShort = a.length > 28 ? a.slice(0, 26) + '…' : a;
     return {{
       name: aShort,
-      type: 'bar',
-      stack: 'total',
-      itemStyle: {{ color, borderRadius: [2, 2, 0, 0] }},
-      emphasis: {{ focus: 'series' }},
-      data: buckets.map((_, bi) => agentBucket[a][bi].length),
-      barCategoryGap: '20%',
+      type: 'scatter',
+      symbolSize: 12,
+      itemStyle: {{ color, opacity: 0.78, borderColor: '#fff', borderWidth: 1 }},
+      emphasis: {{ scale: 1.6, itemStyle: {{ opacity: 1, shadowBlur: 8, shadowColor: color }} }},
+      data: conv.filter(c => c.agent === a && c.bjt_ms).map(c => ({{
+        value: [c.bjt_ms, c.duration_s],
+        conv: c,
+      }})),
     }};
   }});
 
@@ -1989,24 +1958,27 @@ function renderConvHeatmap(key) {{
       itemWidth: 10, itemHeight: 10, textStyle: {{ color: MUTED, fontSize: 11 }},
     }},
     tooltip: tooltipBase({{
-      trigger: 'axis', axisPointer: {{ type: 'shadow' }},
-      enterable: true, extraCssText: 'max-width: 380px; max-height: 420px; overflow-y: auto;',
+      trigger: 'item',
       formatter: tipFormatter,
+      extraCssText: 'max-width: 360px;',
     }}),
-    grid: {{ left: 8, right: 24, top: 32, bottom: 56, containLabel: true }},
+    grid: {{ left: 8, right: 24, top: 32, bottom: 48, containLabel: true }},
     xAxis: {{
-      type: 'category', data: xLabels, name: 'BJT (1 分钟段)', nameLocation: 'middle', nameGap: 34,
+      type: 'time', name: 'BJT 成单时间', nameLocation: 'middle', nameGap: 30,
       axisLabel: {{
-        color: MUTED, fontSize: 10, rotate: 55,
-        interval: xLabels.length > 60 ? 'auto' : (xLabels.length > 30 ? 4 : (xLabels.length > 15 ? 1 : 0)),
+        color: MUTED, fontSize: 10, hideOverlap: true,
+        formatter: v => {{
+          const d = new Date(v);
+          return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+        }},
       }},
       axisLine: {{ lineStyle: {{ color: BORDER }} }},
-      axisTick: {{ show: false }},
+      axisTick: {{ show: true, lineStyle: {{ color: BORDER }} }},
       splitLine: {{ show: false }},
     }},
     yAxis: {{
-      type: 'value', name: '成单数',
-      minInterval: 1,
+      type: 'value', name: '通话时长 (秒)', nameLocation: 'middle', nameGap: 36,
+      min: 0,
       axisLabel: {{ color: MUTED, fontSize: 10 }},
       axisLine: {{ show: false }},
       axisTick: {{ show: false }},
