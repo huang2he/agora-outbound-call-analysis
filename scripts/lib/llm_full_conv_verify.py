@@ -119,6 +119,46 @@ def build_user_prompt(transcript_text: str, structured: dict, agent_name: str) -
 请按 system 指令逐字段打 match/invalid/null, 并给出 verdict. 评判要宽容, 客户不反驳即认可."""
 
 
+# ── verdict 严格计算 (基于业务标准, 不依赖 LLM 数数) ─────────────────────
+
+def _is_empty(v) -> bool:
+    if v is None:
+        return True
+    s = str(v).strip()
+    return s == "" or s.lower() == "null"
+
+
+def derive_verdict(old_so: dict, field_check: dict) -> str:
+    """按业务定义严格判 verdict.
+    带车型完整转换标准 = 品牌非空 + 型号非空 + (城市/时间/姓名) 三选二.
+    把所有 invalid 字段视作空, 再看是否仍满足.
+    """
+    old_so = old_so or {}
+    field_check = field_check or {}
+
+    def slot_ok(f: str) -> bool:
+        v = old_so.get(f)
+        if _is_empty(v):
+            return False
+        return field_check.get(f) != "invalid"
+
+    has_brand = slot_ok("购车品牌")
+    has_model = slot_ok("购车型号")
+    # 车系蕴含品牌: 型号 ok 时品牌默认 ok (汉兰达/凯美瑞 等口语品牌)
+    if has_model and not has_brand:
+        has_brand = True
+
+    extras = sum(1 for f in ["购车城市", "购车时间", "购车姓名"] if slot_ok(f))
+    qualified = has_brand and has_model and extras >= 2
+
+    has_invalid = any(v == "invalid" for v in field_check.values())
+    if not has_invalid:
+        return "valid"
+    if qualified:
+        return "so_partial_wrong"
+    return "conversion_broken"
+
+
 # ── LLM 调用 (复用 llm_fail_analysis 的逻辑) ─────────────────────────────
 
 def _get_backend_and_call():
@@ -143,6 +183,16 @@ def analyze_call(call: dict) -> dict:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ])
+    # 后端强制覆盖 verdict: LLM 数数容易错, 严格按业务标准重算
+    if isinstance(result, dict) and not result.get("error"):
+        fc = result.get("field_check") or {}
+        if fc:
+            llm_verdict = result.get("verdict")
+            derived = derive_verdict(call.get("structured") or {}, fc)
+            result["verdict"] = derived
+            if llm_verdict and llm_verdict != derived:
+                # 保留 LLM 原判作为调试参考 (前端不用)
+                result["_llm_verdict_raw"] = llm_verdict
     return {
         "call_id": call.get("call_id", ""),
         "agent_name": call.get("agent_name", ""),

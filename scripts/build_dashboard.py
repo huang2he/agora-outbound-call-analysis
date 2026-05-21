@@ -836,11 +836,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <strong style="font-size:13px;">可疑 / 造假 案例列表</strong>
     <span id="verify-list-meta" style="color:var(--muted); font-size:11px;"></span>
     <span style="margin-left:auto;">
-      <button class="verify-filter active" data-verdict="problem">原判有误 (含影响 / 不影响)</button>
-      <button class="verify-filter" data-verdict="conversion_broken">仅影响转换</button>
-      <button class="verify-filter" data-verdict="so_partial_wrong">仅不影响</button>
-      <button class="verify-filter" data-verdict="valid">原判生效</button>
-      <button class="verify-filter" data-verdict="all">全部</button>
+      <button class="verify-filter active" data-verdict="all">全部</button>
+      <button class="verify-filter" data-verdict="real">真实成单 (校验后)</button>
+      <button class="verify-filter" data-verdict="valid">原判准确</button>
+      <button class="verify-filter" data-verdict="so_partial_wrong">有误不影响</button>
+      <button class="verify-filter" data-verdict="conversion_broken">影响转换</button>
+      <span style="border-left:1px solid var(--border); margin: 0 6px;"></span>
+      <button id="verify-export-xlsx" class="verify-filter" title="导出当前 filter 的 Excel">⬇ Excel</button>
+      <button id="verify-export-zip" class="verify-filter" title="导出当前 filter 的录音 zip">⬇ 录音 zip</button>
     </span>
   </div>
   <div id="verify-audio-bar" style="display:none; align-items:center; gap:10px; padding:8px 10px; background:var(--panel-2); border:1px solid var(--border); border-radius:6px; margin-bottom:8px;">
@@ -1147,7 +1150,7 @@ let convVerifyByCallId = {{}};   // call_id → 'real'|'suspect'|'fake'
 let convVerifyAllResults = [];   // 含 error 的全部 results (用于算"系统记录成单"总数)
 let convVerifyResults = [];      // 整批 verify ok 结果, render() / scope 函数会用
 let convVerifyDone = false;
-let convVerifyFilter = 'problem';
+let convVerifyFilter = 'all';
 
 const chartIds = ['chart-funnel',
                   'chart-turn-human', 'chart-turn-human-donut',
@@ -3160,7 +3163,7 @@ function renderConvVerifyTable() {{
   if (f === 'conversion_broken')        list = list.filter(r => r.verdict === 'conversion_broken');
   else if (f === 'so_partial_wrong')    list = list.filter(r => r.verdict === 'so_partial_wrong');
   else if (f === 'valid')               list = list.filter(r => r.verdict === 'valid');
-  else if (f === 'problem')             list = list.filter(r => r.verdict === 'conversion_broken' || r.verdict === 'so_partial_wrong');
+  else if (f === 'real')                list = list.filter(r => r.verdict === 'valid' || r.verdict === 'so_partial_wrong');
   // 排序: conversion_broken → so_partial_wrong → valid
   const rank = {{ conversion_broken: 0, so_partial_wrong: 1, valid: 2 }};
   list = list.slice().sort((a, b) => (rank[a.verdict]||9) - (rank[b.verdict]||9));
@@ -3267,17 +3270,88 @@ async function pollConvVerify() {{
 pollConvVerify();
 convVerifyTimer = setInterval(pollConvVerify, 5000);
 
-// Section 4 filter 按钮
-document.querySelectorAll('.verify-filter').forEach(btn => {{
+// Section 4 filter 按钮 (只处理 data-verdict 的)
+document.querySelectorAll('.verify-filter[data-verdict]').forEach(btn => {{
   btn.addEventListener('click', () => {{
     const v = btn.dataset.verdict;
     if (v === convVerifyFilter) return;
     convVerifyFilter = v;
-    document.querySelectorAll('.verify-filter').forEach(b => {{
+    document.querySelectorAll('.verify-filter[data-verdict]').forEach(b => {{
       b.classList.toggle('active', b.dataset.verdict === v);
     }});
     renderConvVerifyTable();
   }});
+}});
+
+// 当前 filter + agent scope 下的样本
+function getVerifyCurrentList() {{
+  let list = (currentAgentKey === DATA.all_key)
+    ? convVerifyResults
+    : convVerifyResults.filter(r => r.agent_name === currentAgentKey);
+  const f = convVerifyFilter;
+  if (f === 'conversion_broken')     list = list.filter(r => r.verdict === 'conversion_broken');
+  else if (f === 'so_partial_wrong') list = list.filter(r => r.verdict === 'so_partial_wrong');
+  else if (f === 'valid')            list = list.filter(r => r.verdict === 'valid');
+  else if (f === 'real')             list = list.filter(r => r.verdict === 'valid' || r.verdict === 'so_partial_wrong');
+  return list;
+}}
+
+function getVerifyFilterTag() {{
+  const map = {{ all: '全部', real: '真实成单', valid: '原判准确', so_partial_wrong: '有误不影响', conversion_broken: '影响转换' }};
+  return map[convVerifyFilter] || convVerifyFilter;
+}}
+
+// 把当前 list 转为 EXCEL_COLS 兼容的 rows
+function verifyListToRows(list) {{
+  const rowById = new Map((DATA.rows || []).map(r => [r['Call ID'], r]));
+  return list.map(r => {{
+    const orig = rowById.get(r.call_id) || {{}};
+    return {{
+      ...orig,
+      // 加 verify 字段方便用户在 Excel 里看
+      'AI 校验判定': verdictLabel(r.verdict),
+      'AI 校验依据': r.reason || '',
+      'AI new_so': JSON.stringify(r.new_so || {{}}, null, 0),
+      'AI field_check': JSON.stringify(r.field_check || {{}}, null, 0),
+    }};
+  }});
+}}
+
+// Excel 导出
+document.getElementById('verify-export-xlsx').addEventListener('click', () => {{
+  const list = getVerifyCurrentList();
+  if (!list.length) {{ showToast('当前筛选下没有记录'); return; }}
+  const rows = verifyListToRows(list);
+  // 临时扩展列, 把 AI 校验字段放最后
+  const cols = [...EXCEL_COLS, 'AI 校验判定', 'AI 校验依据', 'AI new_so', 'AI field_check'];
+  const aoa = [cols].concat(rows.map(r => cols.map(c => r[c] ?? '')));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'verify');
+  const name = exportFilename(`verify-${{getVerifyFilterTag()}}`, list.length, 'xlsx');
+  XLSX.writeFile(wb, name);
+  showToast(`导出 ${{list.length}} 通 → ${{name}}`);
+}});
+
+// 录音 zip 导出
+document.getElementById('verify-export-zip').addEventListener('click', async () => {{
+  if (!SERVER_MODE) {{ showToast('需要 serve_dashboard.py 启动才能下载录音 zip'); return; }}
+  const list = getVerifyCurrentList();
+  if (!list.length) {{ showToast('当前筛选下没有记录'); return; }}
+  const audioRows = verifyListToRows(list).filter(r => r['Audio URL']);
+  if (!audioRows.length) {{ showToast('当前筛选下没有可下载的录音'); return; }}
+  const zipName = exportFilename(`verify-${{getVerifyFilterTag()}}`, audioRows.length, 'zip');
+  const serverGroups = [{{
+    folder: '',
+    files: audioRows.map(r => ({{ filename: audioFilename(r), url: r['Audio URL'] }})),
+  }}];
+  showToast(`服务端打包 ${{audioRows.length}} 条录音…`);
+  try {{
+    await dispatchAudioZip(zipName, serverGroups);
+    showToast(`录音 zip 流式下载 → ${{zipName}}`);
+  }} catch (e) {{
+    showToast(`服务端拒绝: ${{e.message}}`);
+  }}
 }});
 
 // agent 切换时也重新过滤 LLM 数据
