@@ -563,8 +563,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .view-toggle {{ display: inline-flex; gap: 0; margin-left: 8px; }}
   .view-toggle button {{ background: var(--panel); color: var(--muted); border: 1px solid var(--border);
                           font: inherit; font-size: 10px; padding: 3px 9px; cursor: pointer; }}
-  .view-toggle button:first-child {{ border-radius: 4px 0 0 4px; border-right: none; }}
+  .view-toggle button:first-child {{ border-radius: 4px 0 0 4px; }}
   .view-toggle button:last-child {{ border-radius: 0 4px 4px 0; }}
+  .view-toggle button:not(:last-child) {{ border-right: none; }}
   .view-toggle button.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
   .view-toggle button:hover:not(.active) {{ color: var(--text); }}
 
@@ -798,6 +799,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
     <button data-bucket="10" class="active">10 分钟</button>
     <button data-bucket="20">20 分钟</button>
+    <button data-bucket="60">1 小时</button>
   </span>
   <span class="view-toggle" id="conv-cart-metric-toggle" style="margin-left: 8px;">
     <button data-metric="count" class="active">按成单数</button>
