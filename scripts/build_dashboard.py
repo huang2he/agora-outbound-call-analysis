@@ -1128,6 +1128,10 @@ function tooltipBase(extra) {{
   }}, extra || {{}});
 }}
 
+// 顶部声明: render 函数在文件早期被调用, 但 LLM verify polling 在文件末尾.
+// 不提前声明会触发 TDZ.
+let convVerifyByCallId = {{}};   // call_id → 'real'|'suspect'|'fake'
+
 const chartIds = ['chart-funnel',
                   'chart-turn-human', 'chart-turn-human-donut',
                   'chart-turn-full',  'chart-turn-full-donut',
@@ -3106,7 +3110,7 @@ function renderT2CasesTable() {{
 startT2LlmPoll();
 
 // ── 带车型成单真实性校验轮询 (Section 3) ──
-let convVerifyByCallId = {{}};   // call_id → verdict ('real'|'suspect'|'fake')
+// convVerifyByCallId 已在文件顶部 (chartIds 旁) 提前声明, 避免 TDZ.
 let convVerifyDone = false;
 let convVerifyTimer = null;
 async function pollConvVerify() {{
