@@ -830,7 +830,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   对所有"带车型完整转换"做大模型质检, 判断 Structured Output 是<b>客户主动提供 (real) / 客户敷衍 agent 推断 (suspect) / 明确造假 (fake)</b>。
   此 section 异步加载, 不影响上面的统计图渲染速度。
 </p>
-<div class="stats" id="verify-stats" style="grid-template-columns: repeat(4, 1fr);"></div>
+<div class="stats" id="verify-stats" style="grid-template-columns: repeat(5, 1fr);"></div>
 <div class="card" style="margin-top: 12px;">
   <div style="display:flex; align-items:center; gap:8px; margin-bottom: 8px;">
     <strong style="font-size:13px;">可疑 / 造假 案例列表</strong>
@@ -3040,14 +3040,17 @@ function renderConvVerifyReport(d) {{
 
   convVerifyResults = (d.results || []).filter(r => !r.error);
 
-  // KPI 卡 4 个 (新 verdict)
+  // KPI 卡 5 个: 系统原值 + 二次校验真实数 + verdict 三类
   const total = convVerifyResults.length;
   const nValid = convVerifyResults.filter(r => r.verdict === 'valid').length;
   const nPartial = convVerifyResults.filter(r => r.verdict === 'so_partial_wrong').length;
   const nBroken = convVerifyResults.filter(r => r.verdict === 'conversion_broken').length;
+  // 二次校验后真实成单 = valid + so_partial_wrong (剔除 conversion_broken)
+  const nVerifiedReal = nValid + nPartial;
   const pct = (x) => total ? (x/total*100).toFixed(1)+'%' : '—';
   const cards = [
-    {{ label: '已校验总数', val: total, sub: '带车型完整转换通话', color: '#0f172a' }},
+    {{ label: '系统记录成单', val: total, sub: '带车型完整转换原数', color: '#0f172a' }},
+    {{ label: '✓ 真实成单 (校验后)', val: nVerifiedReal, sub: `${{pct(nVerifiedReal)}} · valid+不影响`, color: '#2563eb' }},
     {{ label: '✓ 原判生效', val: nValid, sub: pct(nValid), color: '#047857' }},
     {{ label: '⚠ 有误但不影响', val: nPartial, sub: pct(nPartial), color: '#b45309' }},
     {{ label: '✗ 影响转换结果', val: nBroken, sub: pct(nBroken), color: '#b91c1c' }},
