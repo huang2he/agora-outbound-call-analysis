@@ -1927,6 +1927,10 @@ window.addEventListener('resize', () => {{
 const T2 = DATA.tab2 || null;
 let t2CurrentAgentKey = '__ALL__';
 let t2CurrentBucketLv = 0;
+// 顶部声明: renderT2BucketDetail 在 init 时就会跑, 但 LLM poll 在更后面.
+// 不提前声明会触发 TDZ (Cannot access 't2LlmResultsCache' before initialization).
+let t2LlmResultsCache = [];
+let t2CasesAllOk = [];
 
 function escapeHtml(s) {{
   return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
@@ -2371,8 +2375,8 @@ if (T2) {{
 }}
 
 // ── Tab 2 · LLM 失败画像（轮询 /llm-fail-status）──
+// t2LlmResultsCache 已在文件顶部声明 (避免 TDZ)
 let t2LlmPollTimer = null;
-let t2LlmResultsCache = [];
 
 function startT2LlmPoll() {{
   pollT2Llm();
@@ -2692,7 +2696,7 @@ function renderT2SentimentReversal(ok) {{
   document.getElementById('t2-sentiment-cases').innerHTML = html;
 }}
 
-let t2CasesAllOk = [];        // 当前 scope 下的所有 LLM ok 结果
+// t2CasesAllOk 已在文件顶部声明 (避免 TDZ)
 const t2ExpandedCases = new Set();
 
 function renderT2CasesTable() {{

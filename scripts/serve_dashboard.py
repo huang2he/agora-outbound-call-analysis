@@ -297,14 +297,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/healthz":
             self._send(200, b"ok", "text/plain")
         elif self.path == "/reload-html":
-            # 热重载: 重新 build_html (保留 LLM 内存状态), 不需要重启
+            # 热重载: 只 reload HTML 构造相关模块, 不要 reload llm_fail_analysis -
+            # 那会把模块级 LLM_FAIL_JOB 重置成 idle, 丢掉已跑完的 LLM 结果.
             try:
                 import importlib
                 import lib.agent_kda as _kda
-                import lib.llm_fail_analysis as _llmf
                 import build_dashboard as _bd
                 importlib.reload(_kda)
-                importlib.reload(_llmf)
                 importlib.reload(_bd)
                 g = globals()
                 _html = _bd.build_html(g["ENRICHED_DF"], source=g["CURRENT_SOURCE_PATH"])
