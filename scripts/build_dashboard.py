@@ -2060,13 +2060,17 @@ function renderConvCartHeat(key) {{
       const s = c.structured || {{}};
       const time = (c.bjt || '').slice(11, 19);
       const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="margin-left:6px; color:#2563eb; font-size:11px; text-decoration:none;" title="下载录音">⬇ 录音</a>` : '';
-      return `<div style="margin-bottom:4px; line-height:1.4;">
+      const soChips = ['购车品牌','购车型号','购车城市','购车时间','购车姓名','购车意向']
+        .map(k => {{
+          const v = s[k];
+          if (v === null || v === undefined || String(v).trim() === '') return '';
+          return `<span style="color:#64748b;"> · </span><span style="color:#ea580c;">${{escapeHtml(String(v))}}</span>`;
+        }}).join('');
+      return `<div style="margin-bottom:6px; line-height:1.4; border-bottom: 1px dashed #f1f5f9; padding-bottom:4px;">
         <span style="color:#0f172a;font-weight:600;">${{time}}</span>
         <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span>
-        · <span style="color:#ea580c;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
-        ${{s['购车城市'] ? `· ${{s['购车城市']}}` : ''}}
-        ${{s['购车姓名'] ? `· <b>${{s['购车姓名']}}</b>` : ''}}
         ${{audio}}
+        <br>${{soChips}}
       </div>`;
     }}).join('');
     const more = list.length > 8 ? `<div style="color:#94a3b8;font-size:11px;">... 还有 ${{list.length - 8}} 个</div>` : '';
@@ -3186,6 +3190,23 @@ function renderConvVerifyReport(d) {{
   renderConvVerifyTable();
 }}
 
+// 渲染单个成单的 Structured Output: 全部 6 个字段, 每个字段独立 label
+// 空值显示为灰色横线 (—), 让缺失也能一眼看出.
+function soFieldsHtml(s) {{
+  if (!s) return '<span style="color:#94a3b8;">—</span>';
+  const fields = ['购车品牌', '购车型号', '购车城市', '购车时间', '购车姓名', '购车意向'];
+  return fields.map(k => {{
+    const v = s[k];
+    const empty = v === null || v === undefined || String(v).trim() === '';
+    const valHtml = empty
+      ? '<span style="color:#cbd5e1;">—</span>'
+      : `<b>${{escapeHtml(String(v))}}</b>`;
+    return `<div style="line-height:1.5;">
+      <span style="color:#94a3b8; font-size:10px; display:inline-block; min-width:60px;">${{k}}:</span> ${{valHtml}}
+    </div>`;
+  }}).join('');
+}}
+
 function renderConvVerifyTable() {{
   const wrap = document.getElementById('verify-table-wrap');
   if (!wrap) return;
@@ -3221,7 +3242,7 @@ function renderConvVerifyTable() {{
       <td style="color:#0f172a;">${{escapeHtml(r.reason||'-')}}</td>
       <td style="color:#64748b;">${{(c.bjt||'').slice(11, 19) || '-'}}</td>
       <td style="color:#64748b;">${{escapeHtml(ag)}}</td>
-      <td><b>${{escapeHtml(s['购车品牌']||'')}}${{s['购车型号']?' '+escapeHtml(s['购车型号']):''}}</b>${{s['购车城市']?' · '+escapeHtml(s['购车城市']):''}}${{s['购车姓名']?' · '+escapeHtml(s['购车姓名']):''}}</td>
+      <td>${{soFieldsHtml(s)}}</td>
       <td><code style="background:var(--panel-2);padding:1px 4px;border-radius:3px;font-size:10px;">${{(r.call_id||'').slice(-10)}}</code></td>
       <td>${{audio}}</td>
     </tr>`;
