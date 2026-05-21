@@ -2000,7 +2000,7 @@ function renderConvCartHeat(key) {{
       calculable: true, orient: 'horizontal',
       left: 'center', bottom: 4,
       itemWidth: 12, itemHeight: 120,
-      inRange: {{ color: ['#f1f5f9', '#bfdbfe', '#60a5fa', '#2563eb', '#1e3a8a'] }},
+      inRange: {{ color: ['#fff7ed', '#fed7aa', '#fdba74', '#fb923c', '#ea580c', '#9a3412'] }},
       textStyle: {{ color: MUTED, fontSize: 10 }},
     }},
     series: [{{
@@ -2011,7 +2011,7 @@ function renderConvCartHeat(key) {{
         formatter: p => p.data.value[2] > 0 ? p.data.value[2] : '',
       }},
       itemStyle: {{ borderColor: '#fff', borderWidth: 1 }},
-      emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(37,99,235,0.45)' }} }},
+      emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(234,88,12,0.55)' }} }},
     }}],
   }}, true);
 
