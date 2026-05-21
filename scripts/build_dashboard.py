@@ -804,7 +804,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   X = 时段, Y = Agent, cell 颜色深浅 = 该 agent 该时段的成单数。点格子查看该格内成单 SO 列表。
 </p>
 <div class="card">
-  <div id="chart-conv-cart-heat" class="chart" style="height: 240px; width: 100%;"></div>
+  <div id="chart-conv-cart-heat" class="chart" style="height: 360px; width: 100%;"></div>
   <div id="conv-cart-cell-detail" style="font-size: 12px; color: var(--muted); padding: 6px 4px 0; min-height: 18px;"></div>
 </div>
 
@@ -2033,12 +2033,25 @@ function renderConvCartHeat(key) {{
     series: [{{
       type: 'heatmap', data: heatData,
       label: {{
-        show: true, color: '#0f172a', fontSize: 11, fontWeight: 600,
-        textBorderColor: 'rgba(255,255,255,0.7)', textBorderWidth: 1.5,
-        formatter: p => p.data.value[2] > 0 ? p.data.value[2] : '',
+        show: true, fontSize: 12, lineHeight: 17,
+        textBorderColor: 'rgba(255,255,255,0.85)', textBorderWidth: 2,
+        // 直接在格子里显示 接听 / 成单 / 转单率 三行
+        formatter: p => {{
+          const c = p.data.value[2];
+          const h = p.data.human_n || 0;
+          if (!h && !c) return '';   // 该时段该 agent 完全没数据
+          const rate = h ? ((c / h) * 100).toFixed(1) + '%' : '—';
+          return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}`;
+        }},
+        rich: {{
+          h: {{ fontSize: 11, color: '#475569', fontWeight: 500 }},
+          c: {{ fontSize: 12, color: '#0f172a', fontWeight: 700 }},
+          r: {{ fontSize: 16, color: '#b91c1c', fontWeight: 800,
+                 textBorderColor: 'rgba(255,255,255,0.9)', textBorderWidth: 2 }},
+        }},
       }},
-      itemStyle: {{ borderColor: '#fff', borderWidth: 1 }},
-      emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(234,88,12,0.55)' }} }},
+      itemStyle: {{ borderColor: '#fff', borderWidth: 2 }},
+      emphasis: {{ itemStyle: {{ shadowBlur: 12, shadowColor: 'rgba(234,88,12,0.6)' }} }},
     }}],
   }}, true);
 
