@@ -1091,7 +1091,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <h3>导出</h3>
     <div class="sub" id="modal-sub"></div>
     <div id="modal-server-note" style="display:none; font-size:11px; color:var(--muted); background:var(--panel-2); padding:8px 10px; border-radius:6px; margin-bottom:12px; line-height:1.5;">
-      ⓘ 当前是 <code style="background:white; padding:1px 4px; border-radius:3px;">file://</code> 模式，只能导 Excel。要拉录音请改用 <code style="background:white; padding:1px 4px; border-radius:3px;">serve_dashboard.py</code> 启动 dashboard。
+      ⓘ JSZip 未加载, 无法批量打包录音。请重新生成 HTML 时确认 <code>vendor/jszip.min.js</code> 存在; 或单独下载录音 (浏览器 audio 控件自带 ⋮ 下载).
     </div>
     <div class="options">
       <button class="opt" data-mode="excel">
@@ -1245,7 +1245,55 @@ function downloadBlob(blob, filename) {{
 // download manager handles the bytes (no JS heap accumulation of multi-GB blobs).
 // Returns a promise that resolves when the request is dispatched — actual
 // download completion is owned by the browser.
+// 浏览器内打包 (JSZip), 用于 file:// / offline 模式. groups 同 server 路径结构.
+async function clientSideAudioZip(zipFilename, groups) {{
+  if (typeof JSZip === 'undefined') throw new Error('JSZip 未加载');
+  const zip = new JSZip();
+  // 统计总文件数 + 平铺
+  const allFiles = [];
+  groups.forEach(g => {{
+    const folder = g.folder || '';
+    (g.files || []).forEach(f => allFiles.push({{ folder, ...f }}));
+    if (g.xlsx_b64) {{
+      const b64 = g.xlsx_b64;
+      // base64 → Uint8Array
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const path = (folder ? folder + '/' : '') + (g.xlsx_filename || 'data.xlsx');
+      zip.file(path, arr);
+    }}
+  }});
+  if (!allFiles.length && !zip.files) throw new Error('没有内容可打包');
+  // 限并发 4
+  const total = allFiles.length;
+  let done = 0, failed = 0;
+  const queue = allFiles.slice();
+  async function worker() {{
+    while (queue.length) {{
+      const f = queue.shift();
+      try {{
+        const resp = await fetch(f.url);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const buf = await resp.arrayBuffer();
+        const path = (f.folder ? f.folder + '/' : '') + f.filename;
+        zip.file(path, buf);
+      }} catch (e) {{ failed++; console.warn('音频下载失败', f.filename, e); }}
+      done++;
+      if (typeof showToast === 'function') showToast(`拉取 ${{done}}/${{total}} · 失败 ${{failed}}`);
+    }}
+  }}
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  const blob = await zip.generateAsync({{ type: 'blob', compression: 'STORE' }});
+  downloadBlob(blob, zipFilename);
+  return {{ done, failed, total }};
+}}
+
 function dispatchAudioZip(zipFilename, groups) {{
+  // server 模式且非 offline 才用后端打包; 否则用 JSZip
+  if (!SERVER_MODE || window.__OFFLINE_LLM_VERIFY) {{
+    return clientSideAudioZip(zipFilename, groups);
+  }}
   return new Promise((resolve, reject) => {{
     let iframe = document.getElementById('download-iframe');
     if (!iframe) {{
@@ -1321,7 +1369,8 @@ function setOptDisabled(disabled) {{
   modal.querySelectorAll('button.opt').forEach(b => {{ b.disabled = disabled; }});
 }}
 
-function audioEnabled() {{ return SERVER_MODE; }}
+// 录音批量打包: server 模式走 /audio-zip; file:// / offline 模式只要 JSZip 在也能拉.
+function audioEnabled() {{ return SERVER_MODE || typeof JSZip !== 'undefined'; }}
 
 function makeGroup(name, rows) {{
   return {{ name, rows, audioRows: rows.filter(r => r['Audio URL']) }};
@@ -3355,24 +3404,29 @@ document.getElementById('verify-export-xlsx').addEventListener('click', () => {{
   showToast(`导出 ${{list.length}} 通 → ${{name}}`);
 }});
 
-// 录音 zip 导出
+// 录音 zip 导出 — 用 dispatchAudioZip 统一路径 (server 模式后端流式, 否则浏览器 JSZip)
 document.getElementById('verify-export-zip').addEventListener('click', async () => {{
-  if (!SERVER_MODE || window.__OFFLINE_LLM_VERIFY) {{ showToast('离线 / 静态 HTML 无法批量打包, 请点单个 ▶ 按钮单独下载录音'); return; }}
   const list = getVerifyCurrentList();
   if (!list.length) {{ showToast('当前筛选下没有记录'); return; }}
   const audioRows = verifyListToRows(list).filter(r => r['Audio URL']);
   if (!audioRows.length) {{ showToast('当前筛选下没有可下载的录音'); return; }}
-  const zipName = exportFilename(`verify-${{getVerifyFilterTag()}}`, audioRows.length, 'zip');
-  const serverGroups = [{{
-    folder: '',
-    files: audioRows.map(r => ({{ filename: audioFilename(r), url: r['Audio URL'] }})),
-  }}];
-  showToast(`服务端打包 ${{audioRows.length}} 条录音…`);
+  if (!SERVER_MODE && typeof JSZip === 'undefined') {{ showToast('JSZip 未加载, 无法批量打包. 请点单个 ▶ 单独下载.'); return; }}
+  const total = audioRows.length;
+  if (!SERVER_MODE && total > 80) {{
+    if (!confirm(`浏览器拉取 ${{total}} 条 (~${{Math.ceil(total*0.8)}} MB) 慢且可能卡, 继续?`)) return;
+  }}
+  const zipName = exportFilename(`verify-${{getVerifyFilterTag()}}`, total, 'zip');
+  const groups = [{{ folder: '', files: audioRows.map(r => ({{ filename: audioFilename(r), url: r['Audio URL'] }})) }}];
+  showToast(`开始打包 ${{total}} 条录音…`);
   try {{
-    await dispatchAudioZip(zipName, serverGroups);
-    showToast(`录音 zip 流式下载 → ${{zipName}}`);
+    const res = await dispatchAudioZip(zipName, groups);
+    if (res && res.failed != null) {{
+      showToast(`完成 → ${{zipName}} (成功 ${{res.done - res.failed}} / 失败 ${{res.failed}})`);
+    }} else {{
+      showToast(`下载已交给浏览器 → ${{zipName}}`);
+    }}
   }} catch (e) {{
-    showToast(`服务端拒绝: ${{e.message}}`);
+    showToast(`打包失败: ${{e.message}}`);
   }}
 }});
 
@@ -3413,7 +3467,8 @@ def _vendor_scripts_block() -> str:
     """Inline vendor JS if present, else fall back to CDN tags."""
     vendor_dir = Path(__file__).resolve().parent.parent / "vendor"
     libs = [("echarts.min.js", "https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"),
-            ("xlsx.full.min.js", "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js")]
+            ("xlsx.full.min.js", "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"),
+            ("jszip.min.js", "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js")]
     parts = []
     for fname, cdn in libs:
         local = vendor_dir / fname
