@@ -338,6 +338,21 @@ def transcript_readable(transcript: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _bjt_epoch_ms(raw_ts: str) -> int:
+    """Parse UTC ISO timestamp (Z 形式) → Asia/Shanghai BJT 的 epoch 毫秒.
+    解析失败返回 0."""
+    raw_ts = str(raw_ts or "").strip()
+    if not raw_ts:
+        return 0
+    try:
+        ts_utc = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+        if pd.isna(ts_utc):
+            return 0
+        return int(ts_utc.tz_convert("Asia/Shanghai").timestamp() * 1000)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def row_for_export(row: pd.Series) -> dict:
     return {
         "Call ID": row.get("Call ID", ""),
@@ -387,6 +402,7 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         rec["_assistant_turns"] = int(r["_assistant_turns"])
         rec["_field_count"] = int(r["_field_count"])
         rec["_full_with_model"] = bool(r["_full_with_model"])
+        rec["_bjt_ms"] = _bjt_epoch_ms(r.get("Call Start Time", ""))
         # Carry the parsed Structured Output along so the browser can ship it
         # straight to the LLM endpoint for the intent-truth check.
         rec["_structured"] = r["_structured"]
@@ -405,26 +421,19 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
     conversions = []
     full_with_model = df_enriched[df_enriched["_full_with_model"]]
     for _, r in full_with_model.iterrows():
-        raw_ts = str(r.get("Call Start Time", "")).strip()
+        bjt_ms = _bjt_epoch_ms(r.get("Call Start Time", ""))
         bjt_iso = ""
-        bjt_epoch_ms = 0
-        if raw_ts:
-            try:
-                # CSV 里是 ISO 带 Z 的 UTC. pandas 兼容大多数 ISO 格式.
-                ts_utc = pd.to_datetime(raw_ts, utc=True, errors="coerce")
-                if pd.notna(ts_utc):
-                    ts_bjt = ts_utc.tz_convert("Asia/Shanghai")
-                    bjt_iso = ts_bjt.strftime("%Y-%m-%d %H:%M:%S")
-                    bjt_epoch_ms = int(ts_bjt.timestamp() * 1000)
-            except Exception:
-                pass
+        if bjt_ms:
+            ts_bjt = pd.Timestamp(bjt_ms, unit="ms", tz="UTC").tz_convert("Asia/Shanghai")
+            bjt_iso = ts_bjt.strftime("%Y-%m-%d %H:%M:%S")
         conversions.append({
             "call_id": str(r.get("Call ID", "")),
             "agent": str(r.get("Agent Name", "")),
             "bjt": bjt_iso,
-            "bjt_ms": bjt_epoch_ms,
+            "bjt_ms": bjt_ms,
             "structured": r["_structured"] or {},
             "duration_s": int(r["Duration (seconds)"]),
+            "audio_url": str(r.get("Audio Record File Download URL", "") or ""),
         })
 
     return {
@@ -1937,33 +1946,51 @@ function renderConvCartHeat(key) {{
     const k = bi + '_' + ai;
     (cellMap[k] ||= []).push(c);
   }});
+
+  // 接听基数: 该 (agent, bucket) 的 _human=true 行数. 用全量 DATA.rows 算 (不受 agent 下拉框过滤限制).
+  const humanCell = {{}};
+  (DATA.rows || []).forEach(r => {{
+    if (!r._human || !r._bjt_ms) return;
+    const ai = visibleAgents.indexOf(r._agent);
+    if (ai < 0) return;
+    const bi = buckets.indexOf(bucketStart(r._bjt_ms));
+    if (bi < 0) return;
+    const k = bi + '_' + ai;
+    humanCell[k] = (humanCell[k] || 0) + 1;
+  }});
+
   const heatData = [];
-  // 所有 cell (含 0 单), 让 visualMap 着色
   visibleAgents.forEach((a, ai) => {{
     buckets.forEach((_, bi) => {{
       const list = cellMap[bi + '_' + ai] || [];
-      heatData.push({{ value: [bi, ai, list.length], conv: list }});
+      const humanN = humanCell[bi + '_' + ai] || 0;
+      heatData.push({{ value: [bi, ai, list.length], conv: list, human_n: humanN }});
     }});
   }});
   const maxVal = Math.max(...heatData.map(d => d.value[2]), 1);
 
-  // tooltip: 该 cell 内所有成单 SO
+  // tooltip: 时段 + agent 头部含 (接听 / 成单 / 转单率); 列出每单 SO + 下载录音按钮
   const tipFormatter = p => {{
     const list = p.data.conv || [];
     const ai = p.data.value[1], bi = p.data.value[0];
+    const humanN = p.data.human_n || 0;
+    const rate = humanN ? ((list.length / humanN) * 100).toFixed(1) + '%' : '—';
     const aShort = visibleAgents[ai].length > 28 ? visibleAgents[ai].slice(0,26)+'…' : visibleAgents[ai];
-    const head = `<b>${{aShort}}</b> · ${{xLabels[bi]}}<br><b>${{list.length}} 个成单</b>`
+    const head = `<b>${{aShort}}</b> · ${{xLabels[bi]}}<br>`
+               + `<span style="color:#0f172a;">接听 <b>${{humanN}}</b> · 成单 <b style="color:#ea580c;">${{list.length}}</b> · 转单率 <b style="color:#ea580c;">${{rate}}</b></span>`
                + (list.length ? '<div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>' : '');
     if (!list.length) return head;
     const items = list.slice(0, 8).map(c => {{
       const s = c.structured || {{}};
       const time = (c.bjt || '').slice(11, 19);
+      const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="margin-left:6px; color:#2563eb; font-size:11px; text-decoration:none;" title="下载录音">⬇ 录音</a>` : '';
       return `<div style="margin-bottom:4px; line-height:1.4;">
         <span style="color:#0f172a;font-weight:600;">${{time}}</span>
         <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span>
-        · <span style="color:#2563eb;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
+        · <span style="color:#ea580c;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
         ${{s['购车城市'] ? `· ${{s['购车城市']}}` : ''}}
         ${{s['购车姓名'] ? `· <b>${{s['购车姓名']}}</b>` : ''}}
+        ${{audio}}
       </div>`;
     }}).join('');
     const more = list.length > 8 ? `<div style="color:#94a3b8;font-size:11px;">... 还有 ${{list.length - 8}} 个</div>` : '';
@@ -2073,6 +2100,7 @@ function renderConvHeatmap(key) {{
     const city = s['购车城市'] || '';
     const buyTime = s['购车时间'] || '';
     const name = s['购车姓名'] || '';
+    const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="color:#2563eb;text-decoration:none;">⬇ 下载录音</a>` : '<span style="color:#94a3b8;">无录音 URL</span>';
     return `<div style="line-height:1.5;">
       <span style="display:inline-block;width:8px;height:8px;background:${{color}};border-radius:50%;margin-right:6px;"></span>
       <b>${{aShort}}</b>
@@ -2084,6 +2112,7 @@ function renderConvHeatmap(key) {{
       ${{buyTime ? `<span style="color:#64748b;"> · ${{buyTime}}</span>` : ''}}
       ${{name ? ` · <b>${{name}}</b>` : ''}}
       <br><code style="font-size:10px;color:#94a3b8;">${{(c.call_id||'').slice(-12)}}</code>
+      <div style="margin-top:6px;font-size:12px;">${{audio}}</div>
     </div>`;
   }};
 
@@ -2115,6 +2144,7 @@ function renderConvHeatmap(key) {{
     tooltip: tooltipBase({{
       trigger: 'item',
       formatter: tipFormatter,
+      enterable: true,
       extraCssText: 'max-width: 360px;',
     }}),
     grid: {{ left: 8, right: 24, top: 32, bottom: 48, containLabel: true }},
