@@ -1,0 +1,205 @@
+"""LLM 带车型完整转换 真实性校验。
+
+仅对 `_full_with_model=True` 的通话跑一次, 用 LLM 判断 Structured Output 是不是真实
+从客户口中采集 vs 客户瞎编/敷衍/明确拒绝但 agent 硬填的假成单.
+
+返回 JSON: {"verdict": "real|suspect|fake", "reason": "≤30 字", "evidence_turn": int|null}
+
+复用 llm_fail_analysis 的 OpenAI proxy + DashScope 双 backend / 重试机制.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+
+
+# ── Prompt ────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """你是销售质检专家. 任务: 判断一通已经 "带车型完整转换" 的通话, 它的最终 Structured Output 是不是从客户口中真实采集的, 还是 agent 自己脑补/客户敷衍乱说.
+
+业务背景: AI 外呼销售收集 4 个槽位 (品牌 + 车型 / 城市 / 购车时间 / 姓氏). 这通是被系统标"带车型完整转换"(4 槽都填了, 且型号槽不空). 现在要判它是不是真有效线索.
+
+判定规则:
+- real (真实): 客户主动 / 明确给出了对应信息, 至少 3 个槽位能在 transcript 找到清晰来源, 客户态度配合.
+- suspect (可疑): 客户态度敷衍 / 反复改口 / 用模糊词("随便""都行""你说呢")回答 / 或客户根本没说但 agent 推断填入了某个字段. 不算明显假, 但价值很低.
+- fake (假): 客户明确说"不要""不买""挂电话"或对话基本没有客户参与, 但 SO 仍然标成 4 槽全填. 几乎一定不是真线索.
+
+只返回 JSON, 不要加 markdown 围栏:
+{
+  "verdict": "real | suspect | fake",
+  "reason": "<≤30 字 中文, 关键依据>",
+  "evidence_turn": <int 或 null, 让你判断的最关键 user turn 序号 (1-based, 从真实 user turn 数起), 没有就 null>
+}
+"""
+
+
+def build_user_prompt(transcript_text: str, structured: dict, agent_name: str) -> str:
+    so_text = json.dumps(structured, ensure_ascii=False, indent=2)
+    return f"""[Agent] {agent_name}
+
+[完整 transcript]
+{transcript_text}
+
+[系统记录的最终 Structured Output]
+{so_text}
+
+请判断这个 SO 是真实采集 (real) / 可疑 (suspect) / 明显造假 (fake)."""
+
+
+# ── LLM 调用 (复用 llm_fail_analysis 的逻辑) ─────────────────────────────
+
+def _get_backend_and_call():
+    """从 llm_fail_analysis 拿 backend 配置 + 重试逻辑, 避免重复代码."""
+    try:
+        from . import llm_fail_analysis as F
+    except ImportError:
+        from lib import llm_fail_analysis as F  # type: ignore
+    return F
+
+
+def analyze_call(call: dict) -> dict:
+    """单通通话真实性校验."""
+    F = _get_backend_and_call()
+    transcript_text = F.format_transcript(call.get("transcript") or [])
+    user_msg = build_user_prompt(
+        transcript_text,
+        call.get("structured") or {},
+        call.get("agent_name", "(unknown)"),
+    )
+    result = F._call_llm([
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ])
+    return {
+        "call_id": call.get("call_id", ""),
+        "agent_name": call.get("agent_name", ""),
+        **result,
+    }
+
+
+# ── Job state ──────────────────────────────────────────────────────────────
+
+VERIFY_JOB: dict[str, Any] = {
+    "status": "idle",
+    "total": 0,
+    "done": 0,
+    "results": [],
+    "elapsed_s": 0,
+    "error": None,
+    "model": "",
+    "backend": "",
+}
+VERIFY_LOCK = threading.Lock()
+
+
+def status_snapshot() -> dict:
+    with VERIFY_LOCK:
+        return {
+            "status": VERIFY_JOB["status"],
+            "total": VERIFY_JOB["total"],
+            "done": VERIFY_JOB["done"],
+            "results": list(VERIFY_JOB["results"]),
+            "elapsed_s": VERIFY_JOB["elapsed_s"],
+            "error": VERIFY_JOB["error"],
+            "model": VERIFY_JOB["model"],
+            "backend": VERIFY_JOB["backend"],
+        }
+
+
+def kickoff(df_enriched) -> None:
+    """后台启动: 对所有 _full_with_model=True 的通话跑校验."""
+    F = _get_backend_and_call()
+    backend = F.active_backend()
+
+    # 准备样本
+    work = df_enriched.copy()
+    work["_transcript"] = work["Transcript"].apply(
+        lambda x: __import__("json").loads(x) if isinstance(x, str) and x.strip() else []
+    )
+    fwm = work[work["_full_with_model"]] if "_full_with_model" in work.columns else work
+    # _structured 已经在 enrich 里解析过, 直接用
+    calls = []
+    for _, r in fwm.iterrows():
+        calls.append({
+            "call_id": str(r.get("Call ID", "")),
+            "agent_name": str(r.get("Agent Name", "")),
+            "structured": r.get("_structured") or {},
+            "transcript": r.get("_transcript") or [],
+        })
+
+    with VERIFY_LOCK:
+        VERIFY_JOB["total"] = len(calls)
+        VERIFY_JOB["done"] = 0
+        VERIFY_JOB["results"] = []
+        VERIFY_JOB["elapsed_s"] = 0
+        VERIFY_JOB["error"] = None
+        if not calls:
+            VERIFY_JOB["status"] = "done"
+            return
+        if not backend:
+            VERIFY_JOB["status"] = "skipped"
+            VERIFY_JOB["error"] = "无 LLM key 配置"
+            return
+        VERIFY_JOB["status"] = "running"
+        VERIFY_JOB["model"] = backend[3]
+        VERIFY_JOB["backend"] = backend[0]
+
+    def runner():
+        t0 = time.time()
+        try:
+            # 复用同样的并发设置 (避免压垮反代)
+            with ThreadPoolExecutor(max_workers=F.LLM_WORKERS) as ex:
+                futs = [ex.submit(analyze_call, c) for c in calls]
+                for fut in as_completed(futs):
+                    res = fut.result()
+                    with VERIFY_LOCK:
+                        VERIFY_JOB["results"].append(res)
+                        VERIFY_JOB["done"] = len(VERIFY_JOB["results"])
+                        VERIFY_JOB["elapsed_s"] = round(time.time() - t0, 1)
+            with VERIFY_LOCK:
+                VERIFY_JOB["status"] = "done"
+                VERIFY_JOB["elapsed_s"] = round(time.time() - t0, 1)
+            print(f"[llm-verify-auto] DONE {VERIFY_JOB['done']}/{VERIFY_JOB['total']} in "
+                  f"{VERIFY_JOB['elapsed_s']}s · {backend[0]}/{backend[3]}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            with VERIFY_LOCK:
+                VERIFY_JOB["status"] = "error"
+                VERIFY_JOB["error"] = str(e)[:300]
+            traceback.print_exc()
+
+    threading.Thread(target=runner, daemon=True, name="llm-verify-auto").start()
+    print(f"[llm-verify-auto] START · {len(calls)} calls · {backend[0]}/{backend[3]} "
+          f"· {F.LLM_WORKERS} workers", flush=True)
+
+
+def load_snapshot(snapshot_path) -> bool:
+    """从磁盘加载已经跑过的结果."""
+    from pathlib import Path
+    p = Path(snapshot_path).expanduser().resolve()
+    if not p.is_file():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    results = data.get("results") or []
+    if not isinstance(results, list):
+        return False
+    with VERIFY_LOCK:
+        VERIFY_JOB["status"] = "done"
+        VERIFY_JOB["total"] = len(results)
+        VERIFY_JOB["done"] = len(results)
+        VERIFY_JOB["results"] = list(results)
+        VERIFY_JOB["elapsed_s"] = float(data.get("elapsed_s") or 0)
+        VERIFY_JOB["error"] = None
+        VERIFY_JOB["model"] = str(data.get("model") or "")
+        VERIFY_JOB["backend"] = str(data.get("backend") or "")
+    print(f"[llm-verify-auto] LOADED snapshot · {len(results)} results from {p}", flush=True)
+    return True

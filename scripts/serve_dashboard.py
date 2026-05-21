@@ -333,6 +333,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 from scripts.lib import llm_fail_analysis as F
             payload = json.dumps(F.status_snapshot(), ensure_ascii=False).encode("utf-8")
             self._send(200, payload, "application/json; charset=utf-8")
+        elif self.path == "/llm-verify-status":
+            try:
+                from lib import llm_full_conv_verify as V
+            except ImportError:
+                from scripts.lib import llm_full_conv_verify as V
+            payload = json.dumps(V.status_snapshot(), ensure_ascii=False).encode("utf-8")
+            self._send(200, payload, "application/json; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -613,6 +620,17 @@ def main() -> int:
         except ValueError:
             sample_limit = None
         F.kickoff(enriched, sample_limit=sample_limit)
+
+    # Tab 1 带车型完整转换 真实性校验 (小批量, 不重)
+    try:
+        from lib import llm_full_conv_verify as V
+    except ImportError:
+        from scripts.lib import llm_full_conv_verify as V
+    verify_snapshot = os.environ.get("LLM_VERIFY_SNAPSHOT", "").strip()
+    if verify_snapshot and V.load_snapshot(verify_snapshot):
+        print(f"[llm-verify-auto] using snapshot {verify_snapshot}", flush=True)
+    else:
+        V.kickoff(enriched)
 
     if not args.no_open:
         threading.Timer(0.4, lambda: webbrowser.open(local_url)).start()

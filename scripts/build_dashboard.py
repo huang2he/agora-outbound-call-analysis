@@ -785,17 +785,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 带车型完整转换 · 散点 · agent 不同色</span></h2>
-<p class="section-note">
-  Basic Scatter: 每个点 = 一个<b>带车型完整成单</b>。X = BJT 成单时间, Y = 通话时长 (秒).
-  两个 agent 共用同一对 XY 轴, 用<b>不同颜色</b>区分。<b>悬浮看每单完整 Structured Output</b> (品牌/型号/城市/购车时间/姓)。
-</p>
-<div class="card">
-  <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
+<div class="section-row">
+  <h2 style="margin: 0;">2 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 散点 · 默认折叠</span></h2>
+  <button id="scatter-toggle" type="button"
+    style="margin-left:12px; background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+           font: inherit; font-size: 11px; padding: 4px 12px; cursor: pointer; border-radius: 4px;">
+    展开 ▾
+  </button>
+</div>
+<div id="scatter-wrap" style="display:none;">
+  <p class="section-note">
+    Basic Scatter: 每个点 = 一个<b>带车型完整成单</b>。X = BJT 成单时间, Y = 通话时长 (秒).
+    两个 agent 共用同一对 XY 轴, 用<b>不同颜色</b>区分。<b>悬浮看每单完整 Structured Output</b> + 下载录音。
+  </p>
+  <div class="card">
+    <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
+  </div>
 </div>
 
 <div class="section-row" style="margin-top: 18px; flex-wrap: wrap; gap: 8px;">
-  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
+  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span><span id="conv-verify-status" style="margin-left:10px; font-weight:400; font-size:11px; color: var(--muted);"></span></h2>
   <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
     <button data-bucket="10" class="active">10 分钟</button>
     <button data-bucket="20">20 分钟</button>
@@ -1971,12 +1980,21 @@ function renderConvCartHeat(key) {{
     buckets.forEach((_, bi) => {{
       const list = cellMap[bi + '_' + ai] || [];
       const humanN = humanCell[bi + '_' + ai] || 0;
-      // value[2] 是当前 metric 下用于着色的数. tooltip / label 仍可拿到 conv_n / human_n.
+      // 拆分 verdict 统计
+      let nReal = 0, nSuspect = 0, nFake = 0, nUnknown = 0;
+      list.forEach(c => {{
+        const v = convVerifyByCallId[c.call_id];
+        if (v === 'real') nReal++;
+        else if (v === 'suspect') nSuspect++;
+        else if (v === 'fake') nFake++;
+        else nUnknown++;
+      }});
       const rate = humanN ? (list.length / humanN * 100) : 0;
       const v = (convCartMetric === 'rate') ? Number(rate.toFixed(2)) : list.length;
       heatData.push({{
         value: [bi, ai, v],
         conv: list, human_n: humanN, conv_n: list.length, rate,
+        n_real: nReal, n_suspect: nSuspect, n_fake: nFake, n_unknown: nUnknown,
       }});
     }});
   }});
@@ -1993,12 +2011,19 @@ function renderConvCartHeat(key) {{
                + `<span style="color:#0f172a;">接听 <b>${{humanN}}</b> · 成单 <b style="color:#ea580c;">${{list.length}}</b> · 转单率 <b style="color:#ea580c;">${{rate}}</b></span>`
                + (list.length ? '<div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>' : '');
     if (!list.length) return head;
+    const verdictTag = v => {{
+      if (v === 'real') return '<span style="background:#d1fae5;color:#047857;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">✓ 真实</span>';
+      if (v === 'suspect') return '<span style="background:#fef3c7;color:#b45309;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">? 可疑</span>';
+      if (v === 'fake') return '<span style="background:#fee2e2;color:#b91c1c;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">✗ 造假</span>';
+      return '';
+    }};
     const items = list.slice(0, 8).map(c => {{
       const s = c.structured || {{}};
       const time = (c.bjt || '').slice(11, 19);
       const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="margin-left:6px; color:#2563eb; font-size:11px; text-decoration:none;" title="下载录音">⬇ 录音</a>` : '';
+      const tag = verdictTag(convVerifyByCallId[c.call_id]);
       return `<div style="margin-bottom:4px; line-height:1.4;">
-        <span style="color:#0f172a;font-weight:600;">${{time}}</span>
+        ${{tag}}<span style="color:#0f172a;font-weight:600;">${{time}}</span>
         <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span>
         · <span style="color:#ea580c;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
         ${{s['购车城市'] ? `· ${{s['购车城市']}}` : ''}}
@@ -2059,12 +2084,20 @@ function renderConvCartHeat(key) {{
           const c = p.data.conv_n || 0;
           if (!h && !c) return '';
           const rate = h ? p.data.rate.toFixed(1) + '%' : '—';
-          return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}`;
+          // 真实性 break-down (AI 还没跑完 → 不显示这一行)
+          const knownN = (p.data.n_real || 0) + (p.data.n_suspect || 0) + (p.data.n_fake || 0);
+          const verifyRow = (c > 0 && knownN > 0)
+            ? `\n{{vR|✓${{p.data.n_real||0}}}} {{vS|?${{p.data.n_suspect||0}}}} {{vF|✗${{p.data.n_fake||0}}}}`
+            : '';
+          return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}${{verifyRow}}`;
         }},
         rich: {{
           h: {{ fontSize: 11, color: '#475569', fontWeight: 500 }},
           c: {{ fontSize: 12, color: '#0f172a', fontWeight: 700 }},
           r: {{ fontSize: 17, color: '#b91c1c', fontWeight: 800 }},
+          vR: {{ fontSize: 10, color: '#047857', fontWeight: 700, padding: [0, 3, 0, 0] }},
+          vS: {{ fontSize: 10, color: '#b45309', fontWeight: 700, padding: [0, 3, 0, 0] }},
+          vF: {{ fontSize: 10, color: '#b91c1c', fontWeight: 700 }},
         }},
       }},
       itemStyle: {{ borderColor: '#fff', borderWidth: 2 }},
@@ -2282,6 +2315,19 @@ document.getElementById('conv-cart-bucket-toggle').addEventListener('click', e =
     b.classList.toggle('active', parseInt(b.getAttribute('data-bucket'),10) === m);
   }});
   renderConvCartHeat(currentAgentKey);
+}});
+
+// Section 2 散点折叠 / 展开
+document.getElementById('scatter-toggle').addEventListener('click', () => {{
+  const w = document.getElementById('scatter-wrap');
+  const btn = document.getElementById('scatter-toggle');
+  const open = w.style.display === 'none' || !w.style.display;
+  w.style.display = open ? '' : 'none';
+  btn.textContent = open ? '收起 ▴' : '展开 ▾';
+  // 容器从 0×0 撑开后, ECharts canvas 也要 resize 才会重画
+  if (open) {{
+    setTimeout(() => {{ charts['chart-conv-heatmap'] && charts['chart-conv-heatmap'].resize(); }}, 40);
+  }}
 }});
 
 // 成单热力图 v2 (cartesian) metric (成单数 / 成单比例) 切换
@@ -3058,6 +3104,47 @@ function renderT2CasesTable() {{
 
 // 启动轮询
 startT2LlmPoll();
+
+// ── 带车型成单真实性校验轮询 (Section 3) ──
+let convVerifyByCallId = {{}};   // call_id → verdict ('real'|'suspect'|'fake')
+let convVerifyDone = false;
+let convVerifyTimer = null;
+async function pollConvVerify() {{
+  try {{
+    const resp = await fetch('/llm-verify-status');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const m = {{}};
+    (d.results || []).forEach(r => {{
+      if (r.call_id && r.verdict) m[r.call_id] = r.verdict;
+    }});
+    convVerifyByCallId = m;
+    // 状态条 (复用 Section 3 旁的小提示)
+    const labelEl = document.getElementById('conv-verify-status');
+    if (labelEl) {{
+      if (d.status === 'done') {{
+        labelEl.textContent = `AI 校验完成 · ${{d.done}} 单`;
+        labelEl.style.color = 'var(--muted)';
+      }} else if (d.status === 'running') {{
+        labelEl.textContent = `AI 校验中 ${{d.done}}/${{d.total}}…`;
+        labelEl.style.color = '#b45309';
+      }} else if (d.status === 'skipped' || d.status === 'error') {{
+        labelEl.textContent = `AI 校验跳过: ${{d.error || '-'}}`;
+        labelEl.style.color = '#b91c1c';
+      }} else {{
+        labelEl.textContent = '';
+      }}
+    }}
+    // 触发 Section 3 重渲染 (label 会算 real/suspect/fake 统计)
+    renderConvCartHeat(currentAgentKey);
+    if (d.status === 'done' || d.status === 'error' || d.status === 'skipped') {{
+      convVerifyDone = true;
+      if (convVerifyTimer) {{ clearInterval(convVerifyTimer); convVerifyTimer = null; }}
+    }}
+  }} catch (e) {{ /* 网络抖动忽略 */ }}
+}}
+pollConvVerify();
+convVerifyTimer = setInterval(pollConvVerify, 5000);
 
 // agent 切换时也重新过滤 LLM 数据
 const _origRenderT2All = renderT2All;
