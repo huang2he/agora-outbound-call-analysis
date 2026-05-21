@@ -566,6 +566,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .view-toggle button:first-child {{ border-radius: 4px 0 0 4px; }}
   .view-toggle button:last-child {{ border-radius: 0 4px 4px 0; }}
   .view-toggle button:not(:last-child) {{ border-right: none; }}
+
+  .verify-filter {{ background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+                    font: inherit; font-size: 11px; padding: 3px 9px; cursor: pointer; border-radius: 4px; margin-right: 4px; }}
+  .verify-filter.active {{ background: #ea580c; color: #fff; border-color: #ea580c; }}
+  .verify-filter:hover:not(.active) {{ color: var(--text); }}
+
+  .verify-table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+  .verify-table th {{ background: var(--panel-2); color: var(--muted); font-weight: 500; text-transform: uppercase;
+                       letter-spacing: 0.5px; font-size: 10px; padding: 6px 9px; text-align: left; border-bottom: 1px solid var(--border); }}
+  .verify-table td {{ padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }}
+  .verify-table tr:hover td {{ background: rgba(234, 88, 12, 0.04); }}
+  .verify-chip {{ display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; }}
+  .verify-chip.real {{ background: #d1fae5; color: #047857; }}
+  .verify-chip.suspect {{ background: #fef3c7; color: #b45309; }}
+  .verify-chip.fake {{ background: #fee2e2; color: #b91c1c; }}
   .view-toggle button.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
   .view-toggle button:hover:not(.active) {{ color: var(--text); }}
 
@@ -804,7 +819,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <div class="section-row" style="margin-top: 18px; flex-wrap: wrap; gap: 8px;">
-  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span><span id="conv-verify-status" style="margin-left:10px; font-weight:400; font-size:11px; color: var(--muted);"></span></h2>
+  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
   <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
     <button data-bucket="10" class="active">10 分钟</button>
     <button data-bucket="20">20 分钟</button>
@@ -823,7 +838,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="conv-cart-cell-detail" style="font-size: 12px; color: var(--muted); padding: 6px 4px 0; min-height: 18px;"></div>
 </div>
 
-<h2>4 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>4 · 成单真实性校验 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· LLM 模块 · 异步加载</span><span id="conv-verify-status" style="margin-left:10px; font-weight:400; font-size:11px; color: var(--muted);">等待加载…</span></h2>
+<p class="section-note">
+  对所有"带车型完整转换"做大模型质检, 判断 Structured Output 是<b>客户主动提供 (real) / 客户敷衍 agent 推断 (suspect) / 明确造假 (fake)</b>。
+  此 section 异步加载, 不影响上面的统计图渲染速度。
+</p>
+<div class="stats" id="verify-stats" style="grid-template-columns: repeat(4, 1fr);"></div>
+<div class="card" style="margin-top: 12px;">
+  <div style="display:flex; align-items:center; gap:8px; margin-bottom: 8px;">
+    <strong style="font-size:13px;">可疑 / 造假 案例列表</strong>
+    <span id="verify-list-meta" style="color:var(--muted); font-size:11px;"></span>
+    <span style="margin-left:auto;">
+      <button class="verify-filter active" data-verdict="suspect_fake">可疑 + 造假</button>
+      <button class="verify-filter" data-verdict="fake">仅造假</button>
+      <button class="verify-filter" data-verdict="suspect">仅可疑</button>
+      <button class="verify-filter" data-verdict="real">真实</button>
+      <button class="verify-filter" data-verdict="all">全部</button>
+    </span>
+  </div>
+  <div id="verify-table-wrap"></div>
+</div>
+
+<h2>5 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号）。三张图分别看每个子集的轮次构成，左边柱状（绝对数量），右边环形（每根柱子在该子集里的占比）。</p>
 
 <div class="turn-card">
@@ -848,11 +884,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>5 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
+<h2>6 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>6 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>7 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：4 个槽位 — <b>车型</b> (购车品牌 或 购车型号 任一非 null) · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
@@ -862,7 +898,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 <div class="card" id="full-conv-drill" style="margin-top:8px;"></div>
 
-<h2>7 · 早期挂断（真人接听内 · 互斥分桶）</h2>
+<h2>8 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
   <div class="card">
     <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
@@ -1984,21 +2020,11 @@ function renderConvCartHeat(key) {{
     buckets.forEach((_, bi) => {{
       const list = cellMap[bi + '_' + ai] || [];
       const humanN = humanCell[bi + '_' + ai] || 0;
-      // 拆分 verdict 统计
-      let nReal = 0, nSuspect = 0, nFake = 0, nUnknown = 0;
-      list.forEach(c => {{
-        const v = convVerifyByCallId[c.call_id];
-        if (v === 'real') nReal++;
-        else if (v === 'suspect') nSuspect++;
-        else if (v === 'fake') nFake++;
-        else nUnknown++;
-      }});
       const rate = humanN ? (list.length / humanN * 100) : 0;
       const v = (convCartMetric === 'rate') ? Number(rate.toFixed(2)) : list.length;
       heatData.push({{
         value: [bi, ai, v],
         conv: list, human_n: humanN, conv_n: list.length, rate,
-        n_real: nReal, n_suspect: nSuspect, n_fake: nFake, n_unknown: nUnknown,
       }});
     }});
   }});
@@ -2015,19 +2041,12 @@ function renderConvCartHeat(key) {{
                + `<span style="color:#0f172a;">接听 <b>${{humanN}}</b> · 成单 <b style="color:#ea580c;">${{list.length}}</b> · 转单率 <b style="color:#ea580c;">${{rate}}</b></span>`
                + (list.length ? '<div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>' : '');
     if (!list.length) return head;
-    const verdictTag = v => {{
-      if (v === 'real') return '<span style="background:#d1fae5;color:#047857;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">✓ 真实</span>';
-      if (v === 'suspect') return '<span style="background:#fef3c7;color:#b45309;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">? 可疑</span>';
-      if (v === 'fake') return '<span style="background:#fee2e2;color:#b91c1c;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;margin-right:4px;">✗ 造假</span>';
-      return '';
-    }};
     const items = list.slice(0, 8).map(c => {{
       const s = c.structured || {{}};
       const time = (c.bjt || '').slice(11, 19);
       const audio = c.audio_url ? `<a href="${{c.audio_url}}" download style="margin-left:6px; color:#2563eb; font-size:11px; text-decoration:none;" title="下载录音">⬇ 录音</a>` : '';
-      const tag = verdictTag(convVerifyByCallId[c.call_id]);
       return `<div style="margin-bottom:4px; line-height:1.4;">
-        ${{tag}}<span style="color:#0f172a;font-weight:600;">${{time}}</span>
+        <span style="color:#0f172a;font-weight:600;">${{time}}</span>
         <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span>
         · <span style="color:#ea580c;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
         ${{s['购车城市'] ? `· ${{s['购车城市']}}` : ''}}
@@ -2088,20 +2107,12 @@ function renderConvCartHeat(key) {{
           const c = p.data.conv_n || 0;
           if (!h && !c) return '';
           const rate = h ? p.data.rate.toFixed(1) + '%' : '—';
-          // 真实性 break-down (AI 还没跑完 → 不显示这一行)
-          const knownN = (p.data.n_real || 0) + (p.data.n_suspect || 0) + (p.data.n_fake || 0);
-          const verifyRow = (c > 0 && knownN > 0)
-            ? `\n{{vR|✓${{p.data.n_real||0}}}} {{vS|?${{p.data.n_suspect||0}}}} {{vF|✗${{p.data.n_fake||0}}}}`
-            : '';
-          return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}${{verifyRow}}`;
+          return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}`;
         }},
         rich: {{
           h: {{ fontSize: 11, color: '#475569', fontWeight: 500 }},
           c: {{ fontSize: 12, color: '#0f172a', fontWeight: 700 }},
           r: {{ fontSize: 17, color: '#b91c1c', fontWeight: 800 }},
-          vR: {{ fontSize: 10, color: '#047857', fontWeight: 700, padding: [0, 3, 0, 0] }},
-          vS: {{ fontSize: 10, color: '#b45309', fontWeight: 700, padding: [0, 3, 0, 0] }},
-          vF: {{ fontSize: 10, color: '#b91c1c', fontWeight: 700 }},
         }},
       }},
       itemStyle: {{ borderColor: '#fff', borderWidth: 2 }},
@@ -3109,10 +3120,113 @@ function renderT2CasesTable() {{
 // 启动轮询
 startT2LlmPoll();
 
-// ── 带车型成单真实性校验轮询 (Section 3) ──
+// ── 带车型成单真实性校验 (Section 4) ──
 // convVerifyByCallId 已在文件顶部 (chartIds 旁) 提前声明, 避免 TDZ.
 let convVerifyDone = false;
 let convVerifyTimer = null;
+let convVerifyResults = [];
+let convVerifyFilter = 'suspect_fake';
+
+function renderConvVerifyReport(d) {{
+  // 状态条
+  const statusEl = document.getElementById('conv-verify-status');
+  if (statusEl) {{
+    if (d.status === 'done') {{
+      statusEl.textContent = `校验完成 · ${{d.done}} 单 · 耗时 ${{d.elapsed_s}}s · ${{d.backend||'-'}}/${{d.model||'-'}}`;
+      statusEl.style.color = 'var(--muted)';
+    }} else if (d.status === 'running') {{
+      statusEl.textContent = `进行中 ${{d.done}}/${{d.total}}…`;
+      statusEl.style.color = '#b45309';
+    }} else if (d.status === 'skipped' || d.status === 'error') {{
+      statusEl.textContent = `跳过: ${{d.error || '-'}}`;
+      statusEl.style.color = '#b91c1c';
+    }}
+  }}
+
+  convVerifyResults = (d.results || []).filter(r => !r.error);
+
+  // KPI 卡 4 个
+  const total = convVerifyResults.length;
+  const nReal = convVerifyResults.filter(r => r.verdict === 'real').length;
+  const nSus = convVerifyResults.filter(r => r.verdict === 'suspect').length;
+  const nFake = convVerifyResults.filter(r => r.verdict === 'fake').length;
+  const pct = (x) => total ? (x/total*100).toFixed(1)+'%' : '—';
+  const cards = [
+    {{ label: '已校验总数', val: total, sub: '带车型完整转换通话', color: '#0f172a' }},
+    {{ label: '✓ 真实', val: nReal, sub: pct(nReal), color: '#047857' }},
+    {{ label: '? 可疑', val: nSus, sub: pct(nSus), color: '#b45309' }},
+    {{ label: '✗ 造假', val: nFake, sub: pct(nFake), color: '#b91c1c' }},
+  ];
+  const statsEl = document.getElementById('verify-stats');
+  if (statsEl) {{
+    statsEl.innerHTML = cards.map(c => `
+      <div class="stat" style="background:var(--panel);border-color:var(--border);">
+        <div class="label">${{c.label}}</div>
+        <div class="val" style="color:${{c.color}};">${{c.val}}</div>
+        <div class="pct">${{c.sub}}</div>
+      </div>`).join('');
+  }}
+
+  // 案例列表
+  renderConvVerifyTable();
+}}
+
+function renderConvVerifyTable() {{
+  const wrap = document.getElementById('verify-table-wrap');
+  if (!wrap) return;
+  const f = convVerifyFilter;
+  let list = convVerifyResults;
+  if (f === 'fake')         list = list.filter(r => r.verdict === 'fake');
+  else if (f === 'suspect') list = list.filter(r => r.verdict === 'suspect');
+  else if (f === 'real')    list = list.filter(r => r.verdict === 'real');
+  else if (f === 'suspect_fake') list = list.filter(r => r.verdict === 'suspect' || r.verdict === 'fake');
+  // 按 verdict 排序: fake → suspect → real
+  const rank = {{ fake: 0, suspect: 1, real: 2 }};
+  list = list.slice().sort((a, b) => (rank[a.verdict]||9) - (rank[b.verdict]||9));
+
+  document.getElementById('verify-list-meta').textContent = `${{list.length}} / ${{convVerifyResults.length}} 通`;
+
+  // call_id → conversion (找原数据拿 SO / 录音 url)
+  const convById = new Map((DATA.conversions || []).map(c => [c.call_id, c]));
+
+  if (!list.length) {{
+    wrap.innerHTML = '<div style="color:var(--muted); padding: 16px; text-align:center; font-size: 12px;">当前筛选下没有记录</div>';
+    return;
+  }}
+
+  const rows = list.map(r => {{
+    const c = convById.get(r.call_id) || {{}};
+    const s = c.structured || {{}};
+    const audio = c.audio_url
+      ? `<a href="${{c.audio_url}}" download style="color:#2563eb;text-decoration:none;">⬇ 录音</a>`
+      : '<span style="color:#94a3b8;">—</span>';
+    const ag = (r.agent_name || '').length > 26 ? (r.agent_name||'').slice(0, 24)+'…' : (r.agent_name||'');
+    return `<tr>
+      <td><span class="verify-chip ${{r.verdict||'suspect'}}">${{r.verdict||'?'}}</span></td>
+      <td style="color:#0f172a;">${{escapeHtml(r.reason||'-')}}</td>
+      <td style="color:#64748b;">${{(c.bjt||'').slice(11, 19) || '-'}}</td>
+      <td style="color:#64748b;">${{escapeHtml(ag)}}</td>
+      <td><b>${{escapeHtml(s['购车品牌']||'')}}${{s['购车型号']?' '+escapeHtml(s['购车型号']):''}}</b>${{s['购车城市']?' · '+escapeHtml(s['购车城市']):''}}${{s['购车姓名']?' · '+escapeHtml(s['购车姓名']):''}}</td>
+      <td><code style="background:var(--panel-2);padding:1px 4px;border-radius:3px;font-size:10px;">${{(r.call_id||'').slice(-10)}}</code></td>
+      <td>${{audio}}</td>
+    </tr>`;
+  }}).join('');
+
+  wrap.innerHTML = `<div style="max-height: 420px; overflow-y: auto;">
+    <table class="verify-table">
+      <thead><tr>
+        <th style="width:60px;">判定</th>
+        <th>依据</th>
+        <th style="width:70px;">时间</th>
+        <th style="width:170px;">Agent</th>
+        <th>SO 内容</th>
+        <th style="width:90px;">Call ID</th>
+        <th style="width:60px;">录音</th>
+      </tr></thead>
+      <tbody>${{rows}}</tbody>
+    </table>
+  </div>`;
+}}
 async function pollConvVerify() {{
   try {{
     const resp = await fetch('/llm-verify-status');
@@ -3123,24 +3237,8 @@ async function pollConvVerify() {{
       if (r.call_id && r.verdict) m[r.call_id] = r.verdict;
     }});
     convVerifyByCallId = m;
-    // 状态条 (复用 Section 3 旁的小提示)
-    const labelEl = document.getElementById('conv-verify-status');
-    if (labelEl) {{
-      if (d.status === 'done') {{
-        labelEl.textContent = `AI 校验完成 · ${{d.done}} 单`;
-        labelEl.style.color = 'var(--muted)';
-      }} else if (d.status === 'running') {{
-        labelEl.textContent = `AI 校验中 ${{d.done}}/${{d.total}}…`;
-        labelEl.style.color = '#b45309';
-      }} else if (d.status === 'skipped' || d.status === 'error') {{
-        labelEl.textContent = `AI 校验跳过: ${{d.error || '-'}}`;
-        labelEl.style.color = '#b91c1c';
-      }} else {{
-        labelEl.textContent = '';
-      }}
-    }}
-    // 触发 Section 3 重渲染 (label 会算 real/suspect/fake 统计)
-    renderConvCartHeat(currentAgentKey);
+    // 只刷新 Section 4 (AI 校验报告), 不动 Section 3 热力图.
+    renderConvVerifyReport(d);
     if (d.status === 'done' || d.status === 'error' || d.status === 'skipped') {{
       convVerifyDone = true;
       if (convVerifyTimer) {{ clearInterval(convVerifyTimer); convVerifyTimer = null; }}
@@ -3149,6 +3247,19 @@ async function pollConvVerify() {{
 }}
 pollConvVerify();
 convVerifyTimer = setInterval(pollConvVerify, 5000);
+
+// Section 4 filter 按钮
+document.querySelectorAll('.verify-filter').forEach(btn => {{
+  btn.addEventListener('click', () => {{
+    const v = btn.dataset.verdict;
+    if (v === convVerifyFilter) return;
+    convVerifyFilter = v;
+    document.querySelectorAll('.verify-filter').forEach(b => {{
+      b.classList.toggle('active', b.dataset.verdict === v);
+    }});
+    renderConvVerifyTable();
+  }});
+}});
 
 // agent 切换时也重新过滤 LLM 数据
 const _origRenderT2All = renderT2All;
