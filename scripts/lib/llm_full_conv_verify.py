@@ -22,50 +22,51 @@ from typing import Any
 
 # ── Prompt ────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是销售质检专家. 业务: AI 外呼销售收集 4 个槽位 + 意向, 系统已标"带车型完整转换"(品牌+型号+城市+时间+姓名 都填了).
+SYSTEM_PROMPT = """你是销售质检专家.
 
-任务: 重新基于 transcript 提取 *客户真实表达* 的 SO (new_so), 然后跟系统记录的旧 SO (old_so) 做字段级对比.
+业务的"带车型完整转换"定义:
+  系统 SO 同时满足:
+  (1) 购车品牌 非空
+  (2) 购车型号 非空
+  (3) 购车城市 / 购车时间 / 购车姓名 三项中至少 2 项 非空
 
-6 个槽位:
-  购车品牌 / 购车型号 / 购车城市 / 购车时间 / 购车姓名 / 购车意向
+你的任务:
+  Step 1: 重读 transcript, 给系统 SO 中每个非空字段打一个标签:
+    - match: 客户在 transcript 中亲口或明确肯定地表达过 (含 agent 提问 + 客户确认)
+    - invalid: SO 有值但 transcript 找不到客户表达 (agent 凭空填 / 误听 / 推断 / 客户没回应 / 客户敷衍模糊词)
+    - null: SO 本来就是空
 
-提取 new_so 的原则:
-  - 只填能在 transcript 找到清晰证据的内容. 没听清 / 客户没说 / 客户敷衍 → 填 null.
-  - 客户用模糊词 ("随便" "都行" "看看") 不算明确表达, 应填 null.
-  - 客户多次改口的话, 以最后明确表达为准.
+  Step 2: 把所有 invalid 字段视为 null, 重新看是否仍满足"品牌+型号+三项任意2"标准, 得出 verdict:
+    - valid:             所有非空字段都 match, 原判完全成立
+    - so_partial_wrong:  有 invalid 字段, 但剔除后仍满足完整转换标准 (即不影响最终判定)
+    - conversion_broken: 剔除 invalid 字段后, 不再满足 (品牌/型号/2 项三选二) 标准, 系统判定不应成立
 
-字段级 diff 4 类:
-  match              - 新旧值一致 (含都为 null)
-  mismatch           - 新旧都有值但不同 (agent 误听 / 推断错)
-  filled_no_evidence - 旧 SO 有值但 transcript 找不到任何证据 (agent 凭空填)
-  missing_should_have- 旧 SO 是 null 但 transcript 客户有清晰表达 (agent 漏填)
-
-整体 verdict:
-  real    - 全部 6 字段 diff 都是 match, 且至少 3 个 match 非 null, 客户态度配合
-  suspect - 出现至少 1 个 mismatch 或 filled_no_evidence, 但客户态度不算敌对
-  fake    - 客户明确拒绝/挂断/没参与对话, 但 SO 仍标 4 槽全填
-
-只返回 JSON, 不要加 markdown 围栏:
+只返回 JSON, 不加 markdown 围栏:
 {
+  "verdict": "valid | so_partial_wrong | conversion_broken",
+  "reason": "<≤30 字 中文, 指出最关键的 invalid 字段或证据>",
+  "field_check": {
+    "购车品牌": "match | invalid | null",
+    "购车型号": "match | invalid | null",
+    "购车城市": "match | invalid | null",
+    "购车时间": "match | invalid | null",
+    "购车姓名": "match | invalid | null",
+    "购车意向": "match | invalid | null"
+  },
   "new_so": {
-    "购车品牌": "<值或null>",
-    "购车型号": "<值或null>",
-    "购车城市": "<值或null>",
-    "购车时间": "<值或null>",
-    "购车姓名": "<值或null>",
+    "购车品牌": "<提取值或null>",
+    "购车型号": "<提取值或null>",
+    "购车城市": "<提取值或null>",
+    "购车时间": "<提取值或null>",
+    "购车姓名": "<提取值或null>",
     "购车意向": "是 | 否 | null"
-  },
-  "diff": {
-    "购车品牌": "match | mismatch | filled_no_evidence | missing_should_have",
-    "购车型号": "...",
-    "购车城市": "...",
-    "购车时间": "...",
-    "购车姓名": "...",
-    "购车意向": "..."
-  },
-  "verdict": "real | suspect | fake",
-  "reason": "<≤30 字 中文, 关键依据>"
+  }
 }
+
+注意:
+  - new_so 是你基于 transcript 重新提取的客户真实表达, 找不到证据填 null
+  - 客户用 "随便/都行/看看" 等模糊词回应 = invalid (不算明确表达)
+  - agent 单方面推断, 客户从未回应/确认的字段 = invalid
 """
 
 
@@ -79,7 +80,7 @@ def build_user_prompt(transcript_text: str, structured: dict, agent_name: str) -
 [系统记录的最终 Structured Output]
 {so_text}
 
-请判断这个 SO 是真实采集 (real) / 可疑 (suspect) / 明显造假 (fake)."""
+请按 system 指令逐字段打 match/invalid/null, 并给出 verdict."""
 
 
 # ── LLM 调用 (复用 llm_fail_analysis 的逻辑) ─────────────────────────────

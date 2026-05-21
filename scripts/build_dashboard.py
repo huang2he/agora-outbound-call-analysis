@@ -491,7 +491,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   select {{ font: inherit; font-size: 13px; padding: 5px 26px 5px 8px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel); color: var(--text); appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M1 3l4 4 4-4' stroke='%2364748b' fill='none' stroke-width='1.5'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; min-width: 220px; }}
   select:focus {{ outline: 2px solid var(--accent); outline-offset: -1px; }}
 
-  h2 {{ font-size: 11px; font-weight: 600; color: var(--muted); margin: 14px 0 4px; text-transform: uppercase; letter-spacing: 0.7px; }}
+  h2 {{ font-size: 11px; font-weight: 600; color: var(--muted); margin: 32px 0 10px; text-transform: uppercase; letter-spacing: 0.7px; }}
   .section-note {{ font-size: 11px; color: var(--muted); margin: 0 0 8px; line-height: 1.5; }}
   .section-note b {{ color: var(--text); font-weight: 600; }}
 
@@ -583,6 +583,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .verify-chip.real {{ background: #d1fae5; color: #047857; }}
   .verify-chip.suspect {{ background: #fef3c7; color: #b45309; }}
   .verify-chip.fake {{ background: #fee2e2; color: #b91c1c; }}
+  .verify-chip.valid {{ background: #d1fae5; color: #047857; }}
+  .verify-chip.so_partial_wrong {{ background: #fef3c7; color: #b45309; }}
+  .verify-chip.conversion_broken {{ background: #fee2e2; color: #b91c1c; }}
   .view-toggle button.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
   .view-toggle button:hover:not(.active) {{ color: var(--text); }}
 
@@ -833,17 +836,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <strong style="font-size:13px;">可疑 / 造假 案例列表</strong>
     <span id="verify-list-meta" style="color:var(--muted); font-size:11px;"></span>
     <span style="margin-left:auto;">
-      <button class="verify-filter active" data-verdict="suspect_fake">可疑 + 造假</button>
-      <button class="verify-filter" data-verdict="fake">仅造假</button>
-      <button class="verify-filter" data-verdict="suspect">仅可疑</button>
-      <button class="verify-filter" data-verdict="real">真实</button>
+      <button class="verify-filter active" data-verdict="problem">原判有误 (含影响 / 不影响)</button>
+      <button class="verify-filter" data-verdict="conversion_broken">仅影响转换</button>
+      <button class="verify-filter" data-verdict="so_partial_wrong">仅不影响</button>
+      <button class="verify-filter" data-verdict="valid">原判生效</button>
       <button class="verify-filter" data-verdict="all">全部</button>
     </span>
   </div>
   <div id="verify-table-wrap"></div>
 </div>
 
-<h2>4 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>4 · 早期挂断（真人接听内 · 互斥分桶）</h2>
+<div class="grid-2">
+  <div class="card">
+    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
+    <p class="section-note" style="margin:0 0 12px;">备注：<b>仅计算 agent 说话轮次</b>。集中在前几句的部分代表 <b>AI 表现不好 · 很快被客户识破</b>。</p>
+    <div id="early-hangup-table"></div>
+  </div>
+  <div class="card">
+    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px; display:flex; align-items:center; flex-wrap:wrap;">
+      首句挂断 · Duration 分布
+      <span class="view-toggle" id="fs-view-toggle">
+        <button data-view="all" class="active">全部</button>
+        <button data-view="short">短挂断 (&lt;10秒)</button>
+      </span>
+      <span class="export-hint" style="margin-left:auto;">点柱导出</span>
+    </h3>
+    <p class="section-note" style="margin:0 0 12px;">"AI 刚说完第一句就被掐掉"的通话时长分布。"短挂断"视角聚焦 <b>&lt; 10 秒</b> 的，那些通常是开场白没说完就被切话；"全部"视角包括开场白说完后客户才挂的。</p>
+    <div id="chart-first-sentence-dur" class="chart"></div>
+  </div>
+</div>
+
+<h2>5 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号）。三张图分别看每个子集的轮次构成，左边柱状（绝对数量），右边环形（每根柱子在该子集里的占比）。</p>
 
 <div class="turn-card">
@@ -868,11 +892,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>5 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
+<h2>6 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>6 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>7 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：4 个槽位 — <b>车型</b> (购车品牌 或 购车型号 任一非 null) · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
@@ -882,26 +906,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 <div class="card" id="full-conv-drill" style="margin-top:8px;"></div>
 
-<h2>7 · 早期挂断（真人接听内 · 互斥分桶）</h2>
-<div class="grid-2">
-  <div class="card">
-    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
-    <p class="section-note" style="margin:0 0 12px;">备注：<b>仅计算 agent 说话轮次</b>。集中在前几句的部分代表 <b>AI 表现不好 · 很快被客户识破</b>。</p>
-    <div id="early-hangup-table"></div>
-  </div>
-  <div class="card">
-    <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px; display:flex; align-items:center; flex-wrap:wrap;">
-      首句挂断 · Duration 分布
-      <span class="view-toggle" id="fs-view-toggle">
-        <button data-view="all" class="active">全部</button>
-        <button data-view="short">短挂断 (&lt;10秒)</button>
-      </span>
-      <span class="export-hint" style="margin-left:auto;">点柱导出</span>
-    </h3>
-    <p class="section-note" style="margin:0 0 12px;">"AI 刚说完第一句就被掐掉"的通话时长分布。"短挂断"视角聚焦 <b>&lt; 10 秒</b> 的，那些通常是开场白没说完就被切话；"全部"视角包括开场白说完后客户才挂的。</p>
-    <div id="chart-first-sentence-dur" class="chart"></div>
-  </div>
-</div>
 
 </div><!-- /tab-overview -->
 
@@ -1058,6 +1062,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div><!-- /tab-agent -->
 
 <div id="toast" class="toast"></div>
+
+<div id="transcript-modal" class="modal-backdrop">
+  <div class="modal" style="width: 720px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column;">
+    <h3 style="margin: 0 0 8px;">Transcript <span id="transcript-modal-meta" style="font-weight:400;color:var(--muted);font-size:12px;margin-left:8px;"></span></h3>
+    <div id="transcript-modal-body" style="flex:1; overflow-y: auto; font-size: 12px; line-height: 1.6; background: var(--panel-2); border-radius: 6px; padding: 12px;"></div>
+    <div style="margin-top: 10px; text-align: right;">
+      <button id="transcript-modal-close" style="background: var(--panel); border: 1px solid var(--border); padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">关闭</button>
+    </div>
+  </div>
+</div>
 
 <div id="llm-modal" class="modal-backdrop">
   <div class="modal" style="min-width: 460px; max-width: 640px;">
@@ -2999,7 +3013,7 @@ startT2LlmPoll();
 let convVerifyDone = false;
 let convVerifyTimer = null;
 let convVerifyResults = [];
-let convVerifyFilter = 'suspect_fake';
+let convVerifyFilter = 'problem';
 
 function renderConvVerifyReport(d) {{
   // 状态条
@@ -3019,17 +3033,17 @@ function renderConvVerifyReport(d) {{
 
   convVerifyResults = (d.results || []).filter(r => !r.error);
 
-  // KPI 卡 4 个
+  // KPI 卡 4 个 (新 verdict)
   const total = convVerifyResults.length;
-  const nReal = convVerifyResults.filter(r => r.verdict === 'real').length;
-  const nSus = convVerifyResults.filter(r => r.verdict === 'suspect').length;
-  const nFake = convVerifyResults.filter(r => r.verdict === 'fake').length;
+  const nValid = convVerifyResults.filter(r => r.verdict === 'valid').length;
+  const nPartial = convVerifyResults.filter(r => r.verdict === 'so_partial_wrong').length;
+  const nBroken = convVerifyResults.filter(r => r.verdict === 'conversion_broken').length;
   const pct = (x) => total ? (x/total*100).toFixed(1)+'%' : '—';
   const cards = [
     {{ label: '已校验总数', val: total, sub: '带车型完整转换通话', color: '#0f172a' }},
-    {{ label: '✓ 真实', val: nReal, sub: pct(nReal), color: '#047857' }},
-    {{ label: '? 可疑', val: nSus, sub: pct(nSus), color: '#b45309' }},
-    {{ label: '✗ 造假', val: nFake, sub: pct(nFake), color: '#b91c1c' }},
+    {{ label: '✓ 原判生效', val: nValid, sub: pct(nValid), color: '#047857' }},
+    {{ label: '⚠ 有误但不影响', val: nPartial, sub: pct(nPartial), color: '#b45309' }},
+    {{ label: '✗ 影响转换结果', val: nBroken, sub: pct(nBroken), color: '#b91c1c' }},
   ];
   const statsEl = document.getElementById('verify-stats');
   if (statsEl) {{
@@ -3068,27 +3082,29 @@ function fmtVal(v) {{
   const empty = v === null || v === undefined || String(v).trim() === '' || String(v).trim().toLowerCase() === 'null';
   return empty ? '<span style="color:#cbd5e1;">—</span>' : `<b>${{escapeHtml(String(v))}}</b>`;
 }}
-function diffChip(d) {{
+function fieldCheckChip(c) {{
   const map = {{
-    match:               {{ label: '一致', bg: '#d1fae5', fg: '#047857' }},
-    mismatch:            {{ label: '不符', bg: '#fee2e2', fg: '#b91c1c' }},
-    filled_no_evidence:  {{ label: '凭空填', bg: '#fef3c7', fg: '#b45309' }},
-    missing_should_have: {{ label: '漏填', bg: '#fef3c7', fg: '#b45309' }},
+    match:   {{ label: '客户确认', bg: '#d1fae5', fg: '#047857' }},
+    invalid: {{ label: 'invalid', bg: '#fee2e2', fg: '#b91c1c' }},
+    null:    {{ label: '原本为空', bg: '#f1f5f9', fg: '#64748b' }},
   }};
-  const c = map[d];
-  if (!c) return '';
-  return `<span style="background:${{c.bg}};color:${{c.fg}};padding:0 5px;border-radius:8px;font-size:9px;font-weight:600;margin-left:4px;">${{c.label}}</span>`;
+  const m = map[c];
+  if (!m) return '';
+  return `<span style="background:${{m.bg}};color:${{m.fg}};padding:0 5px;border-radius:8px;font-size:9px;font-weight:600;margin-left:4px;">${{m.label}}</span>`;
 }}
-function soDiffHtml(oldSo, newSo, diff) {{
+function soDiffHtml(oldSo, newSo, fieldCheck) {{
   const fields = ['购车品牌', '购车型号', '购车城市', '购车时间', '购车姓名', '购车意向'];
   oldSo = oldSo || {{}};
   newSo = newSo || {{}};
-  diff  = diff  || {{}};
+  fieldCheck = fieldCheck || {{}};
   return fields.map(k => {{
-    const dchip = diffChip(diff[k]);
-    const rowBg = (diff[k] && diff[k] !== 'match') ? 'background: rgba(254,243,199,0.35);' : '';
+    const fc = fieldCheck[k];
+    const fchip = fieldCheckChip(fc);
+    const rowBg = (fc === 'invalid') ? 'background: rgba(254,226,226,0.45);'
+                : (fc === 'match' && (oldSo[k] !== null && oldSo[k] !== undefined && String(oldSo[k]).trim() !== '')) ? ''
+                : '';
     return `<div style="line-height:1.5;padding:2px 4px;border-radius:3px;${{rowBg}}">
-      <div style="font-size:10px;color:#94a3b8;">${{k}} ${{dchip}}</div>
+      <div style="font-size:10px;color:#94a3b8;">${{k}} ${{fchip}}</div>
       <div style="display:grid;grid-template-columns: 1fr 1fr;gap:4px;font-size:11px;">
         <div><span style="color:#94a3b8;font-size:9px;">原</span> ${{fmtVal(oldSo[k])}}</div>
         <div><span style="color:#2563eb;font-size:9px;">新</span> ${{fmtVal(newSo[k])}}</div>
@@ -3097,23 +3113,63 @@ function soDiffHtml(oldSo, newSo, diff) {{
   }}).join('');
 }}
 
+// 显示某通通话的 transcript modal
+function openTranscriptModal(callId) {{
+  const rowById = new Map((DATA.rows || []).map(r => [r['Call ID'], r]));
+  const r = rowById.get(callId);
+  if (!r) {{ showToast('未找到该通话: ' + (callId||'')); return; }}
+  const tx = String(r['Transcript'] || '');
+  // Transcript 是 'role: content' 多行字符串 (transcript_readable 输出)
+  const lines = tx.split('\\n').filter(Boolean);
+  const html = lines.map(line => {{
+    const isAgent = line.startsWith('assistant');
+    const isUser = line.startsWith('user');
+    const role = isAgent ? 'A' : (isUser ? 'U' : '?');
+    const bg = isAgent ? 'rgba(37,99,235,0.07)' : (isUser ? 'rgba(234,88,12,0.06)' : 'transparent');
+    const fg = isAgent ? '#2563eb' : (isUser ? '#ea580c' : '#64748b');
+    const content = line.replace(/^(assistant|user|system|tool):\\s*/, '');
+    return `<div style="margin-bottom:5px; padding: 4px 8px; background: ${{bg}}; border-radius:4px;">
+      <span style="color:${{fg}}; font-weight:700; font-size:10px; margin-right:6px;">${{role}}</span>
+      <span style="color:#0f172a;">${{escapeHtml(content)}}</span>
+    </div>`;
+  }}).join('');
+  document.getElementById('transcript-modal-body').innerHTML = html || '<span style="color:var(--muted);">无 transcript 数据</span>';
+  document.getElementById('transcript-modal-meta').textContent =
+    `${{(r['Agent Name']||'').slice(0,30)}} · ${{r['Duration (s)']||0}}s · ${{(callId||'').slice(-12)}}`;
+  document.getElementById('transcript-modal').classList.add('show');
+}}
+document.getElementById('transcript-modal-close').addEventListener('click', () => {{
+  document.getElementById('transcript-modal').classList.remove('show');
+}});
+document.getElementById('transcript-modal').addEventListener('click', e => {{
+  if (e.target.id === 'transcript-modal') document.getElementById('transcript-modal').classList.remove('show');
+}});
+
+function verdictLabel(v) {{
+  if (v === 'valid') return '原判生效';
+  if (v === 'so_partial_wrong') return '有误·不影响';
+  if (v === 'conversion_broken') return '影响转换';
+  return v || '?';
+}}
+
 function renderConvVerifyTable() {{
   const wrap = document.getElementById('verify-table-wrap');
   if (!wrap) return;
   const f = convVerifyFilter;
   let list = convVerifyResults;
-  if (f === 'fake')         list = list.filter(r => r.verdict === 'fake');
-  else if (f === 'suspect') list = list.filter(r => r.verdict === 'suspect');
-  else if (f === 'real')    list = list.filter(r => r.verdict === 'real');
-  else if (f === 'suspect_fake') list = list.filter(r => r.verdict === 'suspect' || r.verdict === 'fake');
-  // 按 verdict 排序: fake → suspect → real
-  const rank = {{ fake: 0, suspect: 1, real: 2 }};
+  if (f === 'conversion_broken')        list = list.filter(r => r.verdict === 'conversion_broken');
+  else if (f === 'so_partial_wrong')    list = list.filter(r => r.verdict === 'so_partial_wrong');
+  else if (f === 'valid')               list = list.filter(r => r.verdict === 'valid');
+  else if (f === 'problem')             list = list.filter(r => r.verdict === 'conversion_broken' || r.verdict === 'so_partial_wrong');
+  // 排序: conversion_broken → so_partial_wrong → valid
+  const rank = {{ conversion_broken: 0, so_partial_wrong: 1, valid: 2 }};
   list = list.slice().sort((a, b) => (rank[a.verdict]||9) - (rank[b.verdict]||9));
 
   document.getElementById('verify-list-meta').textContent = `${{list.length}} / ${{convVerifyResults.length}} 通`;
 
-  // call_id → conversion (找原数据拿 SO / 录音 url)
+  // call_id → conversion (找原数据拿 SO / 录音 url + agent_id)
   const convById = new Map((DATA.conversions || []).map(c => [c.call_id, c]));
+  const rowById = new Map((DATA.rows || []).map(r => [r['Call ID'], r]));
 
   if (!list.length) {{
     wrap.innerHTML = '<div style="color:var(--muted); padding: 16px; text-align:center; font-size: 12px;">当前筛选下没有记录</div>';
@@ -3122,36 +3178,45 @@ function renderConvVerifyTable() {{
 
   const rows = list.map(r => {{
     const c = convById.get(r.call_id) || {{}};
+    const origRow = rowById.get(r.call_id) || {{}};
     const s = c.structured || {{}};
     const audio = c.audio_url
       ? `<a href="${{c.audio_url}}" download style="color:#2563eb;text-decoration:none;">⬇ 录音</a>`
       : '<span style="color:#94a3b8;">—</span>';
-    const ag = (r.agent_name || '').length > 26 ? (r.agent_name||'').slice(0, 24)+'…' : (r.agent_name||'');
+    const ag = (r.agent_name || '').length > 22 ? (r.agent_name||'').slice(0, 20)+'…' : (r.agent_name||'');
+    const agentId = origRow['Agent ID'] || '';
+    const eyeBtn = `<button class="verify-eye" data-call="${{escapeHtml(r.call_id||'')}}" title="查看 transcript"
+      style="background:none;border:1px solid var(--border);color:var(--muted);width:24px;height:22px;border-radius:4px;cursor:pointer;font-size:12px;padding:0;">👁</button>`;
     return `<tr>
-      <td><span class="verify-chip ${{r.verdict||'suspect'}}">${{r.verdict||'?'}}</span></td>
+      <td><span class="verify-chip ${{r.verdict||'conversion_broken'}}">${{verdictLabel(r.verdict)}}</span></td>
       <td style="color:#0f172a;">${{escapeHtml(r.reason||'-')}}</td>
-      <td style="color:#64748b;">${{(c.bjt||'').slice(11, 19) || '-'}}</td>
       <td style="color:#64748b;">${{escapeHtml(ag)}}</td>
-      <td>${{soDiffHtml(s, r.new_so, r.diff)}}</td>
-      <td><code style="background:var(--panel-2);padding:1px 4px;border-radius:3px;font-size:10px;">${{(r.call_id||'').slice(-10)}}</code></td>
+      <td><code style="background:var(--panel-2);padding:1px 4px;border-radius:3px;font-size:10px;font-family:monospace;">${{escapeHtml(agentId)}}</code></td>
+      <td>${{soDiffHtml(s, r.new_so, r.field_check)}}</td>
+      <td>${{eyeBtn}}</td>
       <td>${{audio}}</td>
     </tr>`;
   }}).join('');
 
-  wrap.innerHTML = `<div style="max-height: 420px; overflow-y: auto;">
+  wrap.innerHTML = `<div style="max-height: 540px; overflow-y: auto;">
     <table class="verify-table">
       <thead><tr>
-        <th style="width:60px;">判定</th>
+        <th style="width:80px;">判定</th>
         <th style="width:200px;">依据</th>
-        <th style="width:60px;">时间</th>
         <th style="width:140px;">Agent</th>
+        <th style="width:140px;">Agent ID</th>
         <th>SO 原 vs 新 (LLM 重提取)</th>
-        <th style="width:90px;">Call ID</th>
+        <th style="width:40px;">查看</th>
         <th style="width:60px;">录音</th>
       </tr></thead>
       <tbody>${{rows}}</tbody>
     </table>
   </div>`;
+
+  // bind eye buttons
+  wrap.querySelectorAll('.verify-eye').forEach(btn => {{
+    btn.addEventListener('click', () => openTranscriptModal(btn.dataset.call));
+  }});
 }}
 async function pollConvVerify() {{
   try {{

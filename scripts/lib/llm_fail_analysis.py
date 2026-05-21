@@ -191,7 +191,14 @@ def _call_llm(messages: list[dict]) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-            content = payload["choices"][0]["message"]["content"]
+            # 反代偶尔返回的 message 没有 content (触发 safety 等), 给个友好错
+            try:
+                content = payload["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                fr = (payload.get("choices") or [{}])[0].get("finish_reason", "")
+                return {"error": f"LLM 无 content (finish_reason={fr or '?'})"}
+            if content is None:
+                return {"error": "LLM content 为 null (反代拒答)"}
             content = content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1] if "\n" in content else content
