@@ -178,8 +178,11 @@ def _call_llm(messages: list[dict]) -> dict:
     url = (f"{base_url}/v1/chat/completions" if not base_url.endswith("/v1")
            else f"{base_url}/chat/completions")
 
+    # 全错重试: 任何错误都进重试循环, 只要还没用完 attempts 就再试.
+    # 反代偶尔会安全拒答 / 返回非 JSON / 给 4xx, 重试通常能成功.
     last_err = ""
     for attempt in range(LLM_MAX_RETRIES):
+        wait_before_next = LLM_RETRY_BACKOFF_S[min(attempt, len(LLM_RETRY_BACKOFF_S) - 1)]
         req = urllib.request.Request(
             url, method="POST",
             headers={
@@ -191,44 +194,50 @@ def _call_llm(messages: list[dict]) -> dict:
         try:
             with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-            # 反代偶尔返回的 message 没有 content (触发 safety 等), 给个友好错
+            # 反代偶尔返回的 message 没有 content (触发 safety 等)
             try:
                 content = payload["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError):
                 fr = (payload.get("choices") or [{}])[0].get("finish_reason", "")
-                return {"error": f"LLM 无 content (finish_reason={fr or '?'})"}
+                last_err = f"LLM 无 content (finish_reason={fr or '?'})"
+                raise _RetryableError(last_err)
             if content is None:
-                return {"error": "LLM content 为 null (反代拒答)"}
+                last_err = "LLM content 为 null (反代拒答)"
+                raise _RetryableError(last_err)
             content = content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1] if "\n" in content else content
                 if content.endswith("```"):
                     content = content.rsplit("```", 1)[0]
-            return json.loads(content)
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                last_err = f"非 JSON 输出: {str(e)[:120]} · 原文头: {content[:80]}"
+                raise _RetryableError(last_err)
         except urllib.error.HTTPError as e:
             try:
                 err_body = e.read().decode("utf-8", errors="replace")
             except Exception:
                 err_body = ""
             last_err = f"HTTP {e.code}: {err_body[:200]}"
-            # 503 / 429 是反代瞬时不可用 → 等一下重试. 4xx (除 429) 一般是 prompt 问题不重试.
-            retriable = e.code in (429, 500, 502, 503, 504)
-            if not retriable or attempt >= LLM_MAX_RETRIES - 1:
-                return {"error": last_err}
-            wait = LLM_RETRY_BACKOFF_S[min(attempt, len(LLM_RETRY_BACKOFF_S) - 1)]
-            time.sleep(wait)
-        except json.JSONDecodeError as e:
-            return {"error": f"非 JSON 输出: {str(e)[:200]}"}
+            # 全部 HTTP 错误都重试 (即使 4xx - 反代偶尔抽风返回 400/422)
         except (urllib.error.URLError, TimeoutError) as e:
-            # 网络瞬断 / timeout 也重试
             last_err = f"network: {str(e)[:200]}"
-            if attempt >= LLM_MAX_RETRIES - 1:
-                return {"error": last_err}
-            wait = LLM_RETRY_BACKOFF_S[min(attempt, len(LLM_RETRY_BACKOFF_S) - 1)]
-            time.sleep(wait)
+        except _RetryableError:
+            pass  # last_err 已设置
         except Exception as e:  # noqa: BLE001
-            return {"error": str(e)[:300]}
+            last_err = f"unexpected: {str(e)[:200]}"
+
+        # 已 fall through 到这里 = 本次失败, 看还能否再试
+        if attempt >= LLM_MAX_RETRIES - 1:
+            return {"error": last_err or "exhausted retries"}
+        time.sleep(wait_before_next)
     return {"error": last_err or "exhausted retries"}
+
+
+class _RetryableError(Exception):
+    """内部信号: 表示这次调用应该走重试逻辑."""
+    pass
 
 
 def analyze_call(call: dict) -> dict:
