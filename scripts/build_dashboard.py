@@ -401,6 +401,32 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         from scripts.lib import agent_kda
     tab2 = agent_kda.compute_tab2_data(df_enriched)
 
+    # 成单热力图数据: 所有"带车型完整转换"的通话, 把 UTC Call Start Time 转 BJT
+    conversions = []
+    full_with_model = df_enriched[df_enriched["_full_with_model"]]
+    for _, r in full_with_model.iterrows():
+        raw_ts = str(r.get("Call Start Time", "")).strip()
+        bjt_iso = ""
+        bjt_epoch_ms = 0
+        if raw_ts:
+            try:
+                # CSV 里是 ISO 带 Z 的 UTC. pandas 兼容大多数 ISO 格式.
+                ts_utc = pd.to_datetime(raw_ts, utc=True, errors="coerce")
+                if pd.notna(ts_utc):
+                    ts_bjt = ts_utc.tz_convert("Asia/Shanghai")
+                    bjt_iso = ts_bjt.strftime("%Y-%m-%d %H:%M:%S")
+                    bjt_epoch_ms = int(ts_bjt.timestamp() * 1000)
+            except Exception:
+                pass
+        conversions.append({
+            "call_id": str(r.get("Call ID", "")),
+            "agent": str(r.get("Agent Name", "")),
+            "bjt": bjt_iso,
+            "bjt_ms": bjt_epoch_ms,
+            "structured": r["_structured"] or {},
+            "duration_s": int(r["Duration (seconds)"]),
+        })
+
     return {
         "options": [{"key": ALL_KEY, "label": f"{ALL_LABEL} (n={len(df_enriched)})"}]
         + [{"key": a, "label": f"{a} (n={datasets[a]['n']})"} for a in agents],
@@ -408,6 +434,7 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         "rows": rows,
         "all_key": ALL_KEY,
         "tab2": tab2,
+        "conversions": conversions,
     }
 
 
@@ -808,6 +835,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
+<h2>6 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· 带车型完整转换 · BJT 时间 × Agent</span></h2>
+<p class="section-note">
+  每个 cell = 当 agent 当时段的成单数。<b>悬浮看每单完整 Structured Output</b> (车型/城市/购车时间/姓氏)。
+  时间粒度 30 分钟段, 按数据实际范围动态展开。无成单的 cell 不染色。
+</p>
+<div class="card">
+  <div id="chart-conv-heatmap" class="chart" style="height: 380px; width: 100%;"></div>
+</div>
+
 </div><!-- /tab-overview -->
 
 <div id="tab-agent" class="tab-content">
@@ -1059,6 +1095,7 @@ const chartIds = ['chart-funnel',
                   'chart-turn-intent','chart-turn-intent-donut',
                   'chart-duration', 'chart-first-sentence-dur',
                   'chart-field-count', 'chart-field-count-donut',
+                  'chart-conv-heatmap',
                   't2-chart-sankey',
                   't2-chart-waste', 't2-chart-firstword',
                   't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat',
@@ -1838,6 +1875,135 @@ function render(key) {{
   renderFullConversionDrill(d.full_conversion_drill);
   renderEarlyHangupTable(d.early_hangup);
   renderFirstSentenceDur();
+  renderConvHeatmap(key);
+}}
+
+// ── 成单热力图 (Tab 1 Section 6) ──
+function renderConvHeatmap(key) {{
+  const all = DATA.conversions || [];
+  // 按当前 agent 过滤 (key = ALL_KEY 时不过滤)
+  const conv = (key === DATA.all_key) ? all : all.filter(c => c.agent === key);
+  const chart = charts['chart-conv-heatmap'];
+  if (!conv.length) {{
+    chart.clear();
+    chart.setOption({{
+      title: {{ text: '当前 scope 无带车型完整转换', left: 'center', top: 'middle',
+                textStyle: {{ color: MUTED, fontSize: 13 }} }},
+    }});
+    return;
+  }}
+  // 时间 → 30 分钟段 bucket. bucket key = epoch ms 对齐到 30 分钟下边界
+  const BUCKET_MS = 30 * 60 * 1000;
+  const bucketStart = ms => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
+  // Y 轴: agent 排序
+  const agents = [...new Set(conv.map(c => c.agent))].sort();
+  // X 轴: 时间段范围
+  const allMs = conv.map(c => c.bjt_ms).filter(Boolean);
+  if (!allMs.length) {{
+    chart.clear();
+    chart.setOption({{ title: {{ text: '成单缺失时间戳, 无法绘制', left:'center', top:'middle', textStyle:{{color: MUTED, fontSize: 13}} }} }});
+    return;
+  }}
+  const minMs = bucketStart(Math.min(...allMs));
+  const maxMs = bucketStart(Math.max(...allMs));
+  const buckets = [];
+  for (let m = minMs; m <= maxMs; m += BUCKET_MS) buckets.push(m);
+  const bucketLabel = ms => {{
+    const d = new Date(ms);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${{hh}}:${{mm}}`;
+  }};
+  const xLabels = buckets.map(bucketLabel);
+
+  // 聚合: agentIdx × bucketIdx → list of conv
+  const cellMap = {{}};
+  conv.forEach(c => {{
+    if (!c.bjt_ms) return;
+    const bi = buckets.indexOf(bucketStart(c.bjt_ms));
+    const ai = agents.indexOf(c.agent);
+    if (bi < 0 || ai < 0) return;
+    const k = bi + '_' + ai;
+    (cellMap[k] ||= []).push(c);
+  }});
+
+  const heatData = [];
+  Object.entries(cellMap).forEach(([k, list]) => {{
+    const [bi, ai] = k.split('_').map(Number);
+    heatData.push({{ value: [bi, ai, list.length], conv: list }});
+  }});
+  const maxVal = Math.max(...heatData.map(d => d.value[2]), 1);
+
+  // tooltip: 列出 cell 内每个成单的 SO
+  const tipFormatter = p => {{
+    const list = p.data.conv;
+    const head = `<b>${{agents[p.data.value[1]]}}</b> · ${{xLabels[p.data.value[0]]}}-${{bucketLabel(buckets[p.data.value[0]] + BUCKET_MS)}}<br>`
+               + `<b>${{list.length}} 个成单</b><div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>`;
+    const items = list.slice(0, 8).map(c => {{
+      const s = c.structured || {{}};
+      const time = (c.bjt || '').slice(11, 16);
+      const brand = s['购车品牌'] || '';
+      const model = s['购车型号'] || '';
+      const city = s['购车城市'] || '';
+      const buyTime = s['购车时间'] || '';
+      const name = s['购车姓名'] || '';
+      return `<div style="margin-bottom:5px; line-height:1.4;">
+        <span style="color:#0f172a; font-weight:600;">${{time}}</span>
+        <span style="color:#64748b; font-size:11px;"> · ${{c.duration_s}}s</span><br>
+        <span style="color:#2563eb;">${{brand}} ${{model}}</span>
+        ${{city ? `· ${{city}}` : ''}}
+        ${{buyTime ? `· ${{buyTime}}` : ''}}
+        ${{name ? `· <b>${{name}}</b>` : ''}}
+        <br><code style="font-size:10px; color:#94a3b8;">${{(c.call_id||'').slice(-12)}}</code>
+      </div>`;
+    }}).join('');
+    const more = list.length > 8 ? `<div style="color:#94a3b8; font-size:11px;">... 还有 ${{list.length - 8}} 个</div>` : '';
+    return head + items + more;
+  }};
+
+  chart.setOption({{
+    tooltip: tooltipBase({{
+      position: 'top',
+      enterable: true, extraCssText: 'max-width: 360px; max-height: 400px; overflow-y: auto;',
+      formatter: tipFormatter,
+    }}),
+    grid: {{ left: 8, right: 24, top: 24, bottom: 60, containLabel: true }},
+    xAxis: {{
+      type: 'category', data: xLabels, name: 'BJT 时段 (30 分钟)', nameLocation: 'middle', nameGap: 32,
+      axisLabel: {{ color: MUTED, fontSize: 11, rotate: xLabels.length > 6 ? 35 : 0, interval: 0 }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitLine: {{ show: false }},
+    }},
+    yAxis: {{
+      type: 'category', data: agents,
+      axisLabel: {{
+        color: MUTED, fontSize: 11,
+        formatter: v => v.length > 28 ? v.slice(0, 26) + '…' : v,
+      }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitLine: {{ show: false }},
+    }},
+    visualMap: {{
+      min: 0, max: maxVal,
+      calculable: false, orient: 'horizontal', left: 'center', bottom: 4,
+      itemWidth: 10, itemHeight: 90,
+      inRange: {{ color: ['#dbeafe', '#60a5fa', '#2563eb', '#1e3a8a'] }},
+      textStyle: {{ color: MUTED, fontSize: 10 }},
+      text: ['多', '少'],
+    }},
+    series: [{{
+      type: 'heatmap', data: heatData,
+      label: {{
+        show: true, color: '#fff', fontSize: 13, fontWeight: 700,
+        textBorderColor: 'rgba(0,0,0,0.35)', textBorderWidth: 1,
+        formatter: p => p.data.value[2] > 0 ? p.data.value[2] : '',
+      }},
+      itemStyle: {{ borderColor: '#fff', borderWidth: 1 }},
+      emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(37,99,235,0.55)' }} }},
+    }}],
+  }}, true);
 }}
 
 const sel = document.getElementById('agent-select');
