@@ -499,7 +499,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   @media (max-width: 900px) {{ .stats {{ grid-template-columns: repeat(2, 1fr); }} }}
 
   /* Hero+Funnel split: 5 KPI cards stacked on the left, funnel chart on the right */
-  .hero-funnel {{ display: grid; grid-template-columns: 340px 1fr; gap: 10px; align-items: stretch; }}
+  .hero-funnel {{ display: grid; grid-template-columns: 340px 1fr; gap: 10px; align-items: stretch; margin-bottom: 48px; }}
   @media (max-width: 1100px) {{ .hero-funnel {{ grid-template-columns: 1fr; }} }}
   .hero-funnel .stats {{ grid-template-columns: 1fr; gap: 8px; }}
   .hero-funnel .stat {{ padding: 10px 14px; }}
@@ -3180,8 +3180,9 @@ function renderConvVerifyTable() {{
     const c = convById.get(r.call_id) || {{}};
     const origRow = rowById.get(r.call_id) || {{}};
     const s = c.structured || {{}};
+    // 录音: 行内紧凑 audio player (preload=none 不预加载), 点 ▶ 才请求音频
     const audio = c.audio_url
-      ? `<a href="${{c.audio_url}}" download style="color:#2563eb;text-decoration:none;">⬇ 录音</a>`
+      ? `<audio controls preload="none" src="${{escapeHtml(c.audio_url)}}" style="width:200px; height:30px;"></audio>`
       : '<span style="color:#94a3b8;">—</span>';
     const ag = (r.agent_name || '').length > 22 ? (r.agent_name||'').slice(0, 20)+'…' : (r.agent_name||'');
     const agentId = origRow['Agent ID'] || '';
@@ -3207,7 +3208,7 @@ function renderConvVerifyTable() {{
         <th style="width:140px;">Agent ID</th>
         <th>SO 原 vs 新 (LLM 重提取)</th>
         <th style="width:40px;">查看</th>
-        <th style="width:60px;">录音</th>
+        <th style="width:220px;">录音</th>
       </tr></thead>
       <tbody>${{rows}}</tbody>
     </table>
