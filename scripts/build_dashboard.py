@@ -2568,6 +2568,15 @@ function startT2LlmPoll() {{
 }}
 
 async function pollT2Llm() {{
+  // offline 模式: 数据已嵌入 HTML, 不再 fetch
+  if (window.__OFFLINE_LLM_FAIL) {{
+    const d = window.__OFFLINE_LLM_FAIL;
+    t2LlmResultsCache = d.results || [];
+    renderT2LlmStatus(d);
+    renderT2LlmCharts();
+    if (t2LlmPollTimer) {{ clearInterval(t2LlmPollTimer); t2LlmPollTimer = null; }}
+    return;
+  }}
   try {{
     const resp = await fetch('/llm-fail-status');
     if (!resp.ok) return;
@@ -3256,6 +3265,12 @@ document.getElementById('verify-audio-close').addEventListener('click', () => {{
   document.querySelectorAll('#verify-table-wrap .verify-play').forEach(b => b.style.background = '#2563eb');
 }});
 async function pollConvVerify() {{
+  // offline 模式: 数据已嵌入 HTML, 不再 fetch
+  if (window.__OFFLINE_LLM_VERIFY) {{
+    renderConvVerifyReport(window.__OFFLINE_LLM_VERIFY);
+    if (convVerifyTimer) {{ clearInterval(convVerifyTimer); convVerifyTimer = null; }}
+    return;
+  }}
   try {{
     const resp = await fetch('/llm-verify-status');
     if (!resp.ok) return;
@@ -3342,7 +3357,7 @@ document.getElementById('verify-export-xlsx').addEventListener('click', () => {{
 
 // 录音 zip 导出
 document.getElementById('verify-export-zip').addEventListener('click', async () => {{
-  if (!SERVER_MODE) {{ showToast('需要 serve_dashboard.py 启动才能下载录音 zip'); return; }}
+  if (!SERVER_MODE || window.__OFFLINE_LLM_VERIFY) {{ showToast('离线 / 静态 HTML 无法批量打包, 请点单个 ▶ 按钮单独下载录音'); return; }}
   const list = getVerifyCurrentList();
   if (!list.length) {{ showToast('当前筛选下没有记录'); return; }}
   const audioRows = verifyListToRows(list).filter(r => r['Audio URL']);

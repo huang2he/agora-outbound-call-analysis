@@ -340,6 +340,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 from scripts.lib import llm_full_conv_verify as V
             payload = json.dumps(V.status_snapshot(), ensure_ascii=False).encode("utf-8")
             self._send(200, payload, "application/json; charset=utf-8")
+        elif self.path == "/offline-export":
+            # 打包当前 HTML + LLM 全部结果嵌进去 → 单文件离线 HTML
+            try:
+                from lib import llm_fail_analysis as F
+                from lib import llm_full_conv_verify as V
+            except ImportError:
+                from scripts.lib import llm_fail_analysis as F
+                from scripts.lib import llm_full_conv_verify as V
+            html = HTML_BYTES.decode("utf-8")
+            fail_snap = F.status_snapshot()
+            verify_snap = V.status_snapshot()
+            # JSON 序列化后, 转义 </ 防止 </script> 等串提前关闭脚本标签;
+            # 也把 U+2028/U+2029 line separator 转成 \\u 防 JS 解析错.
+            def _safe(o):
+                s = json.dumps(o, ensure_ascii=False)
+                # </script> 防止提前关闭 + U+2028/2029 line separator 转义
+                s = s.replace("</", "<\\/")
+                s = s.replace(chr(0x2028), "\\u2028").replace(chr(0x2029), "\\u2029")
+                return s
+            inject = (
+                "<script>"
+                "window.__OFFLINE_LLM_FAIL = " + _safe(fail_snap)
+                + "; window.__OFFLINE_LLM_VERIFY = " + _safe(verify_snap)
+                + ";</script>"
+            )
+            # 注入到 *最后一个* </body> 之前 (vendor JS 里可能含 '</body>' 字符串字面量)
+            close_body = html.rfind("</body>")
+            if close_body > 0:
+                html = html[:close_body] + inject + html[close_body:]
+            else:
+                html += inject
+            data = html.encode("utf-8")
+            # 文件名建议: agora-{source}-offline-{date}.html
+            from datetime import datetime
+            today = datetime.now().strftime("%Y-%m-%d")
+            fname = f"agora-offline-{CURRENT_SOURCE_PATH or 'dashboard'}-{today}.html"
+            fname = fname.replace(" ", "_").replace("/", "_")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             _encode_header_safe(f'attachment; filename="{fname}"'))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._send(404, b"not found", "text/plain")
 
