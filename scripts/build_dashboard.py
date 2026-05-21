@@ -843,6 +843,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <button class="verify-filter" data-verdict="all">全部</button>
     </span>
   </div>
+  <div id="verify-audio-bar" style="display:none; align-items:center; gap:10px; padding:8px 10px; background:var(--panel-2); border:1px solid var(--border); border-radius:6px; margin-bottom:8px;">
+    <span style="font-size:11px;color:var(--muted);">正在播放:</span>
+    <span id="verify-audio-info" style="font-size:12px;color:var(--text);flex:0 0 auto;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+    <audio id="verify-audio-player" controls style="flex:1; height:32px;"></audio>
+    <button id="verify-audio-close" title="关闭播放器"
+      style="background:none;border:1px solid var(--border);color:var(--muted);width:24px;height:24px;border-radius:4px;cursor:pointer;font-size:13px;padding:0;">✕</button>
+  </div>
   <div id="verify-table-wrap"></div>
 </div>
 
@@ -3180,9 +3187,12 @@ function renderConvVerifyTable() {{
     const c = convById.get(r.call_id) || {{}};
     const origRow = rowById.get(r.call_id) || {{}};
     const s = c.structured || {{}};
-    // 录音: 行内紧凑 audio player (preload=none 不预加载), 点 ▶ 才请求音频
+    // 录音: 只放触发按钮, 实际播放在表格上方独立 player bar
     const audio = c.audio_url
-      ? `<audio controls preload="none" src="${{escapeHtml(c.audio_url)}}" style="width:200px; height:30px;"></audio>`
+      ? `<button class="verify-play" data-call="${{escapeHtml(r.call_id||'')}}" data-url="${{escapeHtml(c.audio_url)}}"
+          data-info="${{escapeHtml((s['购车品牌']||'')+' '+(s['购车型号']||'') + ' · ' + (r.agent_name||'').slice(0,16))}}"
+          title="播放录音"
+          style="background:#2563eb;border:none;color:#fff;width:30px;height:24px;border-radius:4px;cursor:pointer;font-size:12px;padding:0;">▶</button>`
       : '<span style="color:#94a3b8;">—</span>';
     const ag = (r.agent_name || '').length > 22 ? (r.agent_name||'').slice(0, 20)+'…' : (r.agent_name||'');
     const agentId = origRow['Agent ID'] || '';
@@ -3208,7 +3218,7 @@ function renderConvVerifyTable() {{
         <th style="width:140px;">Agent ID</th>
         <th>SO 原 vs 新 (LLM 重提取)</th>
         <th style="width:40px;">查看</th>
-        <th style="width:220px;">录音</th>
+        <th style="width:50px;">录音</th>
       </tr></thead>
       <tbody>${{rows}}</tbody>
     </table>
@@ -3218,7 +3228,31 @@ function renderConvVerifyTable() {{
   wrap.querySelectorAll('.verify-eye').forEach(btn => {{
     btn.addEventListener('click', () => openTranscriptModal(btn.dataset.call));
   }});
+  // bind 录音播放按钮 (统一切到上方 audio bar)
+  wrap.querySelectorAll('.verify-play').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      const bar = document.getElementById('verify-audio-bar');
+      const player = document.getElementById('verify-audio-player');
+      const info = document.getElementById('verify-audio-info');
+      info.textContent = `${{btn.dataset.info}} · ${{(btn.dataset.call||'').slice(-12)}}`;
+      player.src = btn.dataset.url;
+      bar.style.display = 'flex';
+      player.play().catch(() => {{}});
+      // 视觉反馈: 高亮被点的按钮
+      wrap.querySelectorAll('.verify-play').forEach(b => b.style.background = '#2563eb');
+      btn.style.background = '#ea580c';
+    }});
+  }});
 }}
+// 一次性关闭播放器
+document.getElementById('verify-audio-close').addEventListener('click', () => {{
+  const bar = document.getElementById('verify-audio-bar');
+  const player = document.getElementById('verify-audio-player');
+  player.pause();
+  player.src = '';
+  bar.style.display = 'none';
+  document.querySelectorAll('#verify-table-wrap .verify-play').forEach(b => b.style.background = '#2563eb');
+}});
 async function pollConvVerify() {{
   try {{
     const resp = await fetch('/llm-verify-status');
