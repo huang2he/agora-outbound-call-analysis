@@ -1892,8 +1892,8 @@ function renderConvHeatmap(key) {{
     }});
     return;
   }}
-  // 时间 → 30 分钟段 bucket. bucket key = epoch ms 对齐到 30 分钟下边界
-  const BUCKET_MS = 30 * 60 * 1000;
+  // 时间 → 1 分钟段 bucket. bucket key = epoch ms 对齐到分钟下边界
+  const BUCKET_MS = 60 * 1000;
   const bucketStart = ms => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
   // Y 轴: agent 排序
   const agents = [...new Set(conv.map(c => c.agent))].sort();
@@ -1969,8 +1969,12 @@ function renderConvHeatmap(key) {{
     }}),
     grid: {{ left: 8, right: 24, top: 24, bottom: 60, containLabel: true }},
     xAxis: {{
-      type: 'category', data: xLabels, name: 'BJT 时段 (30 分钟)', nameLocation: 'middle', nameGap: 32,
-      axisLabel: {{ color: MUTED, fontSize: 11, rotate: xLabels.length > 6 ? 35 : 0, interval: 0 }},
+      type: 'category', data: xLabels, name: 'BJT 时间 (1 分钟段)', nameLocation: 'middle', nameGap: 36,
+      axisLabel: {{
+        color: MUTED, fontSize: 10, rotate: 55,
+        // 时段太多时, 让 ECharts 自动稀疏 label, cell 仍然每分钟一个
+        interval: xLabels.length > 60 ? 'auto' : (xLabels.length > 30 ? 4 : (xLabels.length > 15 ? 1 : 0)),
+      }},
       axisLine: {{ lineStyle: {{ color: BORDER }} }},
       axisTick: {{ show: false }},
       splitLine: {{ show: false }},
@@ -1996,11 +2000,12 @@ function renderConvHeatmap(key) {{
     series: [{{
       type: 'heatmap', data: heatData,
       label: {{
-        show: true, color: '#fff', fontSize: 13, fontWeight: 700,
-        textBorderColor: 'rgba(0,0,0,0.35)', textBorderWidth: 1,
-        formatter: p => p.data.value[2] > 0 ? p.data.value[2] : '',
+        show: true, color: '#fff', fontSize: maxVal > 1 ? 11 : 10, fontWeight: 700,
+        textBorderColor: 'rgba(0,0,0,0.4)', textBorderWidth: 1,
+        // 1 分钟粒度大部分 cell 是 1, 大块全是 '1' 视觉噪声大: 只在 ≥2 时显字
+        formatter: p => p.data.value[2] >= 2 ? p.data.value[2] : '',
       }},
-      itemStyle: {{ borderColor: '#fff', borderWidth: 1 }},
+      itemStyle: {{ borderColor: '#fff', borderWidth: 0.5 }},
       emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(37,99,235,0.55)' }} }},
     }}],
   }}, true);
