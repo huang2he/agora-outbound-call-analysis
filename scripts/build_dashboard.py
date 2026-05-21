@@ -589,6 +589,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .verify-chip.valid {{ background: #d1fae5; color: #047857; }}
   .verify-chip.so_partial_wrong {{ background: #fef3c7; color: #b45309; }}
   .verify-chip.conversion_broken {{ background: #fee2e2; color: #b91c1c; }}
+  .verify-chip.gray_area {{ background: #e2e8f0; color: #475569; }}
   .view-toggle button.active {{ background: var(--accent); color: white; border-color: var(--accent); }}
   .view-toggle button:hover:not(.active) {{ color: var(--text); }}
 
@@ -830,7 +831,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   对所有"带车型完整转换"做大模型质检, 判断 Structured Output 是<b>客户主动提供 (real) / 客户敷衍 agent 推断 (suspect) / 明确造假 (fake)</b>。
   此 section 异步加载, 不影响上面的统计图渲染速度。
 </p>
-<div class="stats" id="verify-stats" style="grid-template-columns: repeat(5, 1fr);"></div>
+<div class="stats" id="verify-stats" style="grid-template-columns: repeat(6, 1fr);"></div>
 <div class="card" style="margin-top: 12px;">
   <div style="display:flex; align-items:center; gap:8px; margin-bottom: 8px;">
     <strong style="font-size:13px;">可疑 / 造假 案例列表</strong>
@@ -841,6 +842,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <button class="verify-filter" data-verdict="valid">原判准确</button>
       <button class="verify-filter" data-verdict="so_partial_wrong">有误不影响</button>
       <button class="verify-filter" data-verdict="conversion_broken">影响转换</button>
+      <button class="verify-filter" data-verdict="gray_area">灰色地带</button>
       <span style="border-left:1px solid var(--border); margin: 0 6px;"></span>
       <button id="verify-export-xlsx" class="verify-filter" title="导出当前 filter 的 Excel">⬇ Excel</button>
       <button id="verify-export-zip" class="verify-filter" title="导出当前 filter 的录音 zip">⬇ 录音 zip</button>
@@ -3036,6 +3038,7 @@ function renderConvVerifyScope() {{
   const nValid = scope.filter(r => r.verdict === 'valid').length;
   const nPartial = scope.filter(r => r.verdict === 'so_partial_wrong').length;
   const nBroken = scope.filter(r => r.verdict === 'conversion_broken').length;
+  const nGray = scope.filter(r => r.verdict === 'gray_area').length;
   const nVerifiedReal = nValid + nPartial;
   const pct = (x) => totalRecord ? (x/totalRecord*100).toFixed(1)+'%' : '—';
   const errSub = errN ? `· ${{errN}} LLM 失败未计入下方比例` : '带车型完整转换原数';
@@ -3045,6 +3048,7 @@ function renderConvVerifyScope() {{
     {{ label: '✓ 原判生效', val: nValid, sub: pct(nValid), color: '#047857' }},
     {{ label: '⚠ 有误但不影响', val: nPartial, sub: pct(nPartial), color: '#b45309' }},
     {{ label: '✗ 影响转换结果', val: nBroken, sub: pct(nBroken), color: '#b91c1c' }},
+    {{ label: '◐ 灰色地带', val: nGray, sub: `${{pct(nGray)}} · 豪车调戏/品牌错配`, color: '#475569' }},
   ];
   const statsEl = document.getElementById('verify-stats');
   if (statsEl) {{
@@ -3148,6 +3152,7 @@ function verdictLabel(v) {{
   if (v === 'valid') return '原判生效';
   if (v === 'so_partial_wrong') return '有误·不影响';
   if (v === 'conversion_broken') return '影响转换';
+  if (v === 'gray_area') return '灰色地带';
   return v || '?';
 }}
 
@@ -3163,6 +3168,7 @@ function renderConvVerifyTable() {{
   if (f === 'conversion_broken')        list = list.filter(r => r.verdict === 'conversion_broken');
   else if (f === 'so_partial_wrong')    list = list.filter(r => r.verdict === 'so_partial_wrong');
   else if (f === 'valid')               list = list.filter(r => r.verdict === 'valid');
+  else if (f === 'gray_area')           list = list.filter(r => r.verdict === 'gray_area');
   else if (f === 'real')                list = list.filter(r => r.verdict === 'valid' || r.verdict === 'so_partial_wrong');
   // 排序: conversion_broken → so_partial_wrong → valid
   const rank = {{ conversion_broken: 0, so_partial_wrong: 1, valid: 2 }};
@@ -3292,12 +3298,13 @@ function getVerifyCurrentList() {{
   if (f === 'conversion_broken')     list = list.filter(r => r.verdict === 'conversion_broken');
   else if (f === 'so_partial_wrong') list = list.filter(r => r.verdict === 'so_partial_wrong');
   else if (f === 'valid')            list = list.filter(r => r.verdict === 'valid');
+  else if (f === 'gray_area')        list = list.filter(r => r.verdict === 'gray_area');
   else if (f === 'real')             list = list.filter(r => r.verdict === 'valid' || r.verdict === 'so_partial_wrong');
   return list;
 }}
 
 function getVerifyFilterTag() {{
-  const map = {{ all: '全部', real: '真实成单', valid: '原判准确', so_partial_wrong: '有误不影响', conversion_broken: '影响转换' }};
+  const map = {{ all: '全部', real: '真实成单', valid: '原判准确', so_partial_wrong: '有误不影响', conversion_broken: '影响转换', gray_area: '灰色地带' }};
   return map[convVerifyFilter] || convVerifyFilter;
 }}
 

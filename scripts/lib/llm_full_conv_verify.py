@@ -64,7 +64,8 @@ new_so 字段提取规则:
 只返回 JSON, 不加 markdown 围栏:
 {
   "verdict": "valid | so_partial_wrong | conversion_broken",
-  "reason": "<≤30 字 中文, 指出最关键的 invalid 字段或证据>",
+  "reason": "<≤30 字 中文, 关键证据>",
+  "gray_area": "luxury_tease | brand_model_mismatch | null",
   "field_check": {
     "购车品牌": "match | invalid | null",
     "购车型号": "match | invalid | null",
@@ -82,6 +83,22 @@ new_so 字段提取规则:
     "购车意向": "是 | 否 | null"
   }
 }
+
+gray_area 灰色地带识别 (单独标, 优先级最高):
+  - luxury_tease: 客户态度随意敷衍但 SO 标了 100w+ 超豪车 (保时捷帕拉梅拉/劳斯莱斯/宾利/迈巴赫/法拉利/兰博基尼 等),
+    客户回答短/笑/带玩笑口吻/姓氏怪异 (如"姓吹""姓牛"), 不像真正购车需求, 而是调戏 / 测试 / 戏耍.
+    判定要点: 价格 100w 以上的车 + 客户态度不严肃 = luxury_tease
+  - brand_model_mismatch: SO 品牌字段和型号字段是不同的车 (如 "本田" 配 "凯美瑞", "奔驰" 配 "X5"), 客户原话本身就矛盾, 或 agent 拼装错误
+    豁免: 子品牌情况不算 mismatch (如 梅赛德斯-迈巴赫 / 劳斯莱斯-库里南 / 兰博基尼-Urus)
+  - null: 不属于上述任何灰色情况
+
+灰色样例:
+  case A (luxury_tease):
+    SO 品牌=保时捷, 型号=帕拉梅拉, 姓=吹, 客户"姓吹牛, 吹", 态度笑闹
+    → gray_area = "luxury_tease"
+  case B (brand_model_mismatch):
+    SO 品牌=梅赛德斯奔驰, 型号=迈巴赫 (规范应该是 梅赛德斯-迈巴赫 一个品牌, 但写成两个字段不严谨)
+    → gray_area = "brand_model_mismatch" (品牌和型号不是同一辆车的常规命名)
 
 正反例参考:
 
@@ -128,13 +145,22 @@ def _is_empty(v) -> bool:
     return s == "" or s.lower() == "null"
 
 
-def derive_verdict(old_so: dict, field_check: dict) -> str:
+def derive_verdict(old_so: dict, field_check: dict, llm_gray: str | None = None) -> str:
     """按业务定义严格判 verdict.
     带车型完整转换标准 = 品牌非空 + 型号非空 + (城市/时间/姓名) 三选二.
     把所有 invalid 字段视作空, 再看是否仍满足.
+
+    优先级:
+      1. llm_gray 非空 → gray_area (LLM 识别为豪车调戏 / 品牌型号不符)
+      2. 不满足品牌+型号+三选二 → conversion_broken (硬性条件不达标)
+      3. 有 invalid 字段 → so_partial_wrong
+      4. 全 match → valid
     """
     old_so = old_so or {}
     field_check = field_check or {}
+
+    if llm_gray and str(llm_gray).strip().lower() not in ("", "null", "none"):
+        return "gray_area"
 
     def slot_ok(f: str) -> bool:
         v = old_so.get(f)
@@ -151,12 +177,14 @@ def derive_verdict(old_so: dict, field_check: dict) -> str:
     extras = sum(1 for f in ["购车城市", "购车时间", "购车姓名"] if slot_ok(f))
     qualified = has_brand and has_model and extras >= 2
 
+    if not qualified:
+        # 硬性条件不满足 (型号或品牌空, 或三选二不够) → conversion_broken
+        return "conversion_broken"
+
     has_invalid = any(v == "invalid" for v in field_check.values())
-    if not has_invalid:
-        return "valid"
-    if qualified:
+    if has_invalid:
         return "so_partial_wrong"
-    return "conversion_broken"
+    return "valid"
 
 
 # ── LLM 调用 (复用 llm_fail_analysis 的逻辑) ─────────────────────────────
@@ -188,7 +216,8 @@ def analyze_call(call: dict) -> dict:
         fc = result.get("field_check") or {}
         if fc:
             llm_verdict = result.get("verdict")
-            derived = derive_verdict(call.get("structured") or {}, fc)
+            llm_gray = result.get("gray_area")
+            derived = derive_verdict(call.get("structured") or {}, fc, llm_gray)
             result["verdict"] = derived
             if llm_verdict and llm_verdict != derived:
                 # 保留 LLM 原判作为调试参考 (前端不用)
