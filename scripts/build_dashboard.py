@@ -782,6 +782,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <select id="agent-select">
       {select_options}
     </select>
+    <a id="btn-offline-export" href="/offline-export" download
+       title="把当前 dashboard 含全部 LLM 校验结果打包成单文件离线 HTML"
+       style="margin-left:12px; background:#0f172a; color:#fff; border:none; font:inherit; font-size:11px; padding:6px 12px; cursor:pointer; border-radius:4px; text-decoration:none; display:inline-block;">
+      ⬇ 导出离线 HTML
+    </a>
   </div>
 </header>
 
@@ -1207,6 +1212,15 @@ function exportFilename(category, n, ext) {{
 }}
 
 const SERVER_MODE = (window.location.protocol === 'http:' || window.location.protocol === 'https:');
+
+// '导出离线 HTML' 按钮: 只 server 模式且非已离线时显示 (offline HTML 自己再嵌按钮没意义)
+(function() {{
+  const btn = document.getElementById('btn-offline-export');
+  if (!btn) return;
+  if (!SERVER_MODE || window.__OFFLINE_LLM_VERIFY) {{
+    btn.style.display = 'none';
+  }}
+}})();
 
 const EXCEL_COLS = ['Call ID', 'Switch Call ID', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
                     'Max turn_id', 'Assistant turns', 'Is Human Answered', 'Is Full Conversion',
