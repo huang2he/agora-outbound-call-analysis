@@ -793,11 +793,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
 </div>
 
-<div class="section-row" style="margin-top: 18px;">
+<div class="section-row" style="margin-top: 18px; flex-wrap: wrap; gap: 8px;">
   <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
   <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
     <button data-bucket="10" class="active">10 分钟</button>
     <button data-bucket="20">20 分钟</button>
+  </span>
+  <span class="view-toggle" id="conv-cart-metric-toggle" style="margin-left: 8px;">
+    <button data-metric="count" class="active">按成单数</button>
+    <button data-metric="rate">按转单率</button>
   </span>
 </div>
 <p class="section-note">
@@ -1905,8 +1909,9 @@ function render(key) {{
 }}
 
 // ── 成单热力图 v2 (Heatmap on Cartesian, Section 3) ──
-// X = 时段 (10 或 20 分钟可切换), Y = Agent, value = 该 (agent, 时段) 成单数
+// X = 时段 (10 / 20 分钟可切换), Y = Agent, 着色按成单数 OR 转单率 可切换
 let convCartBucketMin = 10;
+let convCartMetric = 'count';  // 'count' = 按成单数着色 | 'rate' = 按转单率着色
 function renderConvCartHeat(key) {{
   const chart = charts['chart-conv-cart-heat'];
   if (!chart) return;
@@ -1964,7 +1969,13 @@ function renderConvCartHeat(key) {{
     buckets.forEach((_, bi) => {{
       const list = cellMap[bi + '_' + ai] || [];
       const humanN = humanCell[bi + '_' + ai] || 0;
-      heatData.push({{ value: [bi, ai, list.length], conv: list, human_n: humanN }});
+      // value[2] 是当前 metric 下用于着色的数. tooltip / label 仍可拿到 conv_n / human_n.
+      const rate = humanN ? (list.length / humanN * 100) : 0;
+      const v = (convCartMetric === 'rate') ? Number(rate.toFixed(2)) : list.length;
+      heatData.push({{
+        value: [bi, ai, v],
+        conv: list, human_n: humanN, conv_n: list.length, rate,
+      }});
     }});
   }});
   const maxVal = Math.max(...heatData.map(d => d.value[2]), 1);
@@ -1974,7 +1985,7 @@ function renderConvCartHeat(key) {{
     const list = p.data.conv || [];
     const ai = p.data.value[1], bi = p.data.value[0];
     const humanN = p.data.human_n || 0;
-    const rate = humanN ? ((list.length / humanN) * 100).toFixed(1) + '%' : '—';
+    const rate = humanN ? (p.data.rate).toFixed(1) + '%' : '—';
     const aShort = visibleAgents[ai].length > 28 ? visibleAgents[ai].slice(0,26)+'…' : visibleAgents[ai];
     const head = `<b>${{aShort}}</b> · ${{xLabels[bi]}}<br>`
                + `<span style="color:#0f172a;">接听 <b>${{humanN}}</b> · 成单 <b style="color:#ea580c;">${{list.length}}</b> · 转单率 <b style="color:#ea580c;">${{rate}}</b></span>`
@@ -2029,29 +2040,46 @@ function renderConvCartHeat(key) {{
       itemWidth: 12, itemHeight: 120,
       inRange: {{ color: ['#fff7ed', '#fed7aa', '#fdba74', '#fb923c', '#ea580c', '#9a3412'] }},
       textStyle: {{ color: MUTED, fontSize: 10 }},
+      formatter: convCartMetric === 'rate' ? (v => v.toFixed(1) + '%') : undefined,
     }},
     series: [{{
       type: 'heatmap', data: heatData,
       label: {{
-        show: true, fontSize: 12, lineHeight: 17,
-        textBorderColor: 'rgba(255,255,255,0.85)', textBorderWidth: 2,
+        show: true, fontSize: 12, lineHeight: 18,
+        // 整块半透明白底色块, 解决橙红 cell 上字看不清的问题
+        backgroundColor: 'rgba(255,255,255,0.82)',
+        padding: [5, 8],
+        borderRadius: 5,
+        align: 'center', verticalAlign: 'middle',
         // 直接在格子里显示 接听 / 成单 / 转单率 三行
         formatter: p => {{
-          const c = p.data.value[2];
           const h = p.data.human_n || 0;
-          if (!h && !c) return '';   // 该时段该 agent 完全没数据
-          const rate = h ? ((c / h) * 100).toFixed(1) + '%' : '—';
+          const c = p.data.conv_n || 0;
+          if (!h && !c) return '';
+          const rate = h ? p.data.rate.toFixed(1) + '%' : '—';
           return `{{h|接听 ${{h}}}}\n{{c|成单 ${{c}}}}\n{{r|${{rate}}}}`;
         }},
         rich: {{
           h: {{ fontSize: 11, color: '#475569', fontWeight: 500 }},
           c: {{ fontSize: 12, color: '#0f172a', fontWeight: 700 }},
-          r: {{ fontSize: 16, color: '#b91c1c', fontWeight: 800,
-                 textBorderColor: 'rgba(255,255,255,0.9)', textBorderWidth: 2 }},
+          r: {{ fontSize: 17, color: '#b91c1c', fontWeight: 800 }},
         }},
       }},
       itemStyle: {{ borderColor: '#fff', borderWidth: 2 }},
-      emphasis: {{ itemStyle: {{ shadowBlur: 12, shadowColor: 'rgba(234,88,12,0.6)' }} }},
+      // 进入动画: 错位 stagger, 让格子依次铺开. hover 时格子描边 + 阴影变化.
+      animationDuration: 700,
+      animationEasing: 'cubicOut',
+      animationDelay: idx => idx * 35,
+      emphasis: {{
+        itemStyle: {{
+          borderColor: '#ea580c', borderWidth: 3,
+          shadowBlur: 18, shadowColor: 'rgba(234,88,12,0.55)',
+        }},
+        label: {{
+          backgroundColor: '#fff',
+          shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.15)',
+        }},
+      }},
     }}],
   }}, true);
 
@@ -2250,6 +2278,19 @@ document.getElementById('conv-cart-bucket-toggle').addEventListener('click', e =
   convCartBucketMin = m;
   document.querySelectorAll('#conv-cart-bucket-toggle button').forEach(b => {{
     b.classList.toggle('active', parseInt(b.getAttribute('data-bucket'),10) === m);
+  }});
+  renderConvCartHeat(currentAgentKey);
+}});
+
+// 成单热力图 v2 (cartesian) metric (成单数 / 成单比例) 切换
+document.getElementById('conv-cart-metric-toggle').addEventListener('click', e => {{
+  const btn = e.target.closest('button[data-metric]');
+  if (!btn) return;
+  const m = btn.getAttribute('data-metric');
+  if (m === convCartMetric) return;
+  convCartMetric = m;
+  document.querySelectorAll('#conv-cart-metric-toggle button').forEach(b => {{
+    b.classList.toggle('active', b.getAttribute('data-metric') === m);
   }});
   renderConvCartHeat(currentAgentKey);
 }});
