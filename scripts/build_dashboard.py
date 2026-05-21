@@ -1213,6 +1213,16 @@ function safeFilename(s) {{
   return String(s).replace(/[\\\\/:*?"<>|]/g, '_').slice(0, 80);
 }}
 
+// 统一文件名: 类目名称 + 数量 + 导出日期 (YYYY-MM-DD)
+function todayStr() {{
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${{d.getFullYear()}}-${{pad(d.getMonth()+1)}}-${{pad(d.getDate())}}`;
+}}
+function exportFilename(category, n, ext) {{
+  return safeFilename(`${{category}}-n${{n}}-${{todayStr()}}`) + '.' + ext;
+}}
+
 const SERVER_MODE = (window.location.protocol === 'http:' || window.location.protocol === 'https:');
 
 const EXCEL_COLS = ['Call ID', 'Switch Call ID', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
@@ -1384,15 +1394,16 @@ modal.addEventListener('click', e => {{ if (e.target === modal) closeExportDialo
 async function runExport(mode) {{
   if (!currentExport) return;
   const {{ groups, filenameHint, kind }} = currentExport;
-  const scope = buildScopeName();
   const useFolders = kind === 'triple';
-  const zipBase = safeFilename(`agora-${{scope}}-${{filenameHint}}`);
+  // 类目名 = filenameHint (例如 funnel-意向客户 / turn-human-id3 / fields-2)
+  const category = filenameHint;
+  const totalN = groups.reduce((s, g) => s + (g.rows ? g.rows.length : 0), 0);
 
   // EXCEL-ONLY ───────────────────────────────────
   if (mode === 'excel') {{
     if (kind === 'single') {{
       const g = groups[0];
-      const name = safeFilename(`${{zipBase}}-n${{g.rows.length}}`) + '.xlsx';
+      const name = exportFilename(category, g.rows.length, 'xlsx');
       XLSX.writeFile(buildWorkbook(g.rows), name);
       showToast(`已导出 ${{g.rows.length}} 通 → ${{name}}`);
     }} else {{
@@ -1406,7 +1417,7 @@ async function runExport(mode) {{
           if (!g.rows.length) continue;
           progressText.textContent = `导出 ${{i+1}}/${{groups.length}}: ${{g.name}}`;
           progressBar.style.width = `${{((i+1) / groups.length) * 100}}%`;
-          const name = safeFilename(`${{zipBase}}-${{g.name}}-n${{g.rows.length}}`) + '.xlsx';
+          const name = exportFilename(`${{category}}-${{g.name}}`, g.rows.length, 'xlsx');
           XLSX.writeFile(buildWorkbook(g.rows), name);
           await new Promise(r => setTimeout(r, 400));
         }}
@@ -1416,15 +1427,16 @@ async function runExport(mode) {{
         progressWrap.style.display = 'block';
         progressText.textContent = '打包 zip…';
         progressBar.style.width = '60%';
+        const zipName = exportFilename(category, totalN, 'zip');
         const serverGroups = groups.filter(g => g.rows.length > 0).map(g => ({{
           folder: g.name,
           xlsx_b64: workbookBase64(g.rows),
-          xlsx_filename: safeFilename(`${{g.name}}-n${{g.rows.length}}`) + '.xlsx',
+          xlsx_filename: exportFilename(`${{category}}-${{g.name}}`, g.rows.length, 'xlsx'),
           files: [],
         }}));
-        await dispatchAudioZip(zipBase + '.zip', serverGroups);
+        await dispatchAudioZip(zipName, serverGroups);
         progressBar.style.width = '100%';
-        showToast(`已导出 3 个 xlsx → ${{zipBase}}.zip`);
+        showToast(`已导出 3 个 xlsx → ${{zipName}}`);
       }}
     }}
     closeExportDialog();
@@ -1461,18 +1473,19 @@ async function runExport(mode) {{
     if (mode === 'both' && g.rows.length) {{
       item.xlsx_b64 = workbookBase64(g.rows);
       item.xlsx_filename = useFolders
-        ? safeFilename(`${{g.name}}-n${{g.rows.length}}`) + '.xlsx'
-        : safeFilename(`${{zipBase}}-n${{g.rows.length}}`) + '.xlsx';
+        ? exportFilename(`${{category}}-${{g.name}}`, g.rows.length, 'xlsx')
+        : exportFilename(category, g.rows.length, 'xlsx');
     }}
     return item;
   }});
 
+  const zipName = exportFilename(category, totalAudio, 'zip');
   try {{
-    await dispatchAudioZip(zipBase + '.zip', serverGroups);
+    await dispatchAudioZip(zipName, serverGroups);
     stopFakeProgress(fakeTimer);
     progressBar.style.width = '100%';
     progressText.textContent = '已交给浏览器下载 · 进度看浏览器下载区';
-    showToast(`服务端正在流式打包 → ${{zipBase}}.zip（浏览器自己接收）`);
+    showToast(`服务端正在流式打包 → ${{zipName}}（浏览器自己接收）`);
   }} catch (err) {{
     stopFakeProgress(fakeTimer);
     showToast(`服务端拒绝: ${{err.message}}`);
@@ -3426,7 +3439,7 @@ function exportLLMResults() {{
   ws['!cols'] = [16, 28, 8, 16, 8, 36, 36, 24, 8, 10, 60, 28].map(w => ({{ wch: w }}));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'llm-intent');
-  const fname = safeFilename(`agora-llm-intent-${{buildScopeName()}}-n${{llmResults.length}}`) + '.xlsx';
+  const fname = exportFilename(`llm-intent-${{buildScopeName()}}`, llmResults.length, 'xlsx');
   XLSX.writeFile(wb, fname);
   showToast(`导出 ${{llmResults.length}} 条 → ${{fname}}`);
 }}
