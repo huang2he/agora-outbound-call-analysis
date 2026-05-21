@@ -356,6 +356,7 @@ def _bjt_epoch_ms(raw_ts: str) -> int:
 def row_for_export(row: pd.Series) -> dict:
     return {
         "Call ID": row.get("Call ID", ""),
+        "Switch Call ID": row.get("Switch Call ID", ""),
         "Agent ID": row.get("Agent ID", ""),
         "Agent Name": row.get("Agent Name", ""),
         "Duration (s)": int(row["Duration (seconds)"]),
@@ -365,6 +366,7 @@ def row_for_export(row: pd.Series) -> dict:
         "Is Human Answered": bool(row["_human"]),
         "Is Full Conversion": bool(row["_full"]),
         "Is Intent": bool(row["_intent"]),
+        "Structured Output": row.get("Structured Output", ""),
         "Transcript": transcript_readable(row["_transcript"]),
         "Audio URL": row.get("Audio Record File Download URL", ""),
     }
@@ -1213,9 +1215,9 @@ function safeFilename(s) {{
 
 const SERVER_MODE = (window.location.protocol === 'http:' || window.location.protocol === 'https:');
 
-const EXCEL_COLS = ['Call ID', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
+const EXCEL_COLS = ['Call ID', 'Switch Call ID', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
                     'Max turn_id', 'Assistant turns', 'Is Human Answered', 'Is Full Conversion',
-                    'Is Intent', 'Transcript', 'Audio URL'];
+                    'Is Intent', 'Structured Output', 'Transcript', 'Audio URL'];
 
 function buildWorkbook(rows) {{
   const aoa = [EXCEL_COLS].concat(rows.map(r => EXCEL_COLS.map(c => r[c] ?? '')));
