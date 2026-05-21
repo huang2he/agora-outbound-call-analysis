@@ -839,21 +839,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </p>
   <div id="t2-buckets" class="t2-bucket-grid"></div>
 
-  <h2>3 · 选中桶详情 <span id="t2-bk-title" style="color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 6px;"></span></h2>
-  <div class="t2-grid">
-    <div class="card">
-      <h3 class="t2-card-title">该桶为什么卡住 <span style="font-weight:400;color:var(--muted);font-size:11px;">· LLM 判定的失败类别</span></h3>
-      <p class="section-note">把该桶的 LLM 失败画像聚合：核心是 agent 卡在 <b id="t2-bk-stuck">-</b>。</p>
-      <div id="t2-bk-reasons"></div>
-    </div>
-    <div class="card">
-      <h3 class="t2-card-title">该桶 typical 案例 <span style="font-weight:400;color:var(--muted);font-size:11px;">· 5 个最长 transcript</span></h3>
-      <p class="section-note">看实际通话长什么样。<span style="color:#b91c1c;font-weight:600;">红色高亮</span> = LLM 判定 agent 出问题的那一句。</p>
-      <div id="t2-bk-cases" style="max-height: 420px; overflow-y: auto;"></div>
-    </div>
-  </div>
-
-  <h2>4 · Agent 效率画像 <span style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">· 纯统计 · 不调 LLM</span></h2>
+  <h2>3 · Agent 效率画像 <span style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">· 纯统计 · 不调 LLM</span></h2>
   <p class="section-note">
     把"客户给了多少机会"和"agent 实际收了多少信息"做对比. 三组指标分别看
     <b>机会浪费率</b> (客户开过口但 agent 没收到任何信息) · <b>采集效率</b> (全过通话有多快) ·
@@ -875,7 +861,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <h2>5 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
+  <h2>4 · LLM 失败画像 <span id="t2-llm-status" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;">加载中…</span></h2>
   <p class="section-note">服务端用大模型 (gpt-5.4 / qwen3.6-plus) 逐通分析"agent 在哪一轮出问题 / 客户在哪一轮识破 / 失败类别"。后台跑，每 5 秒自动刷新。</p>
 
   <div id="t2-llm-kpi" class="stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 12px; display: none;">
@@ -926,7 +912,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="t2-chart-fail-cat" class="chart" style="height: 320px;"></div>
   </div>
 
-  <h2>6 · 客户态度反转 (LLM 判定)</h2>
+  <h2>5 · 客户态度反转 (LLM 判定)</h2>
   <p class="section-note">
     比较客户在通话开局 vs 结尾的态度. 三类信号:<br>
     🟢 <b>挽留成功</b>: 消极/中性开局 → 积极/中性结尾 (agent 把客户聊回来了)<br>
@@ -944,7 +930,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <h2>7 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
+  <h2>6 · LLM 失败案例列表 <span id="t2-cases-meta" style="color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px;"></span></h2>
   <p class="section-note">
     每行 = 一个失败通话。表格直接显示 Call ID 和 LLM 给的全部判定。
     点击 <b>展开按钮</b> 看完整 transcript。
@@ -2086,151 +2072,8 @@ function renderT2Buckets() {{
 }}
 
 function renderT2BucketDetail() {{
-  const d = t2CurrentData();
-  if (!d) return;
-  const b = d.buckets.find(x => x.level === t2CurrentBucketLv);
-  if (!b) return;
-  const stuckText = b.level === 4 ? '全过 (没卡住)'
-    : `第 ${{b.level + 1}} 关 (${{['车型','城市','时间','姓氏'][b.level]}})`;
-  document.getElementById('t2-bk-title').textContent =
-    `· ${{b.level}} 关桶 (n=${{b.count}}) · ${{stuckText}}`;
-  document.getElementById('t2-bk-stuck').textContent = stuckText;
-
-  // 左卡：失败原因分布
-  // 0 关：用启发式原因 (该桶后端就计算过)
-  // 1-3 关：从 LLM 失败画像里取该 pass_n 的 fail_category 聚合
-  // 4 关：成功桶，不展示原因
-  const reasonsEl = document.getElementById('t2-bk-reasons');
-  if (b.level === 4) {{
-    reasonsEl.innerHTML = '<div style="color: #047857; font-size: 13px; padding: 12px;">✓ 全过桶不展示失败原因。看右侧"成功 transcript"参考。</div>';
-  }} else if (b.level === 0 && Object.keys(b.reasons || {{}}).length) {{
-    // 0 关用启发式 + LLM 双源对比（如果 LLM 跑完了）
-    const heur = b.reasons || {{}};
-    const heurTotal = Object.values(heur).reduce((s, v) => s + v, 0) || 1;
-    const sorted = Object.entries(heur).sort((a, b) => b[1] - a[1]);
-    let html = '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">关键词启发式分类 (本地秒出，看趋势)</div>';
-    html += sorted.map(([name, n]) => {{
-      const pct = (n / heurTotal * 100);
-      return `<div class="t2-reason-row">
-        <div class="label">${{escapeHtml(name)}}</div>
-        <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%;"></div></div>
-        <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
-      </div>`;
-    }}).join('');
-    // 如果有 LLM 结果，追加 LLM fail_category
-    const llmBucketRes = (t2LlmResultsCache || []).filter(r => !r.error && r.pass_n === b.level);
-    if (llmBucketRes.length) {{
-      const cat = {{}};
-      llmBucketRes.forEach(r => {{ const c = r.fail_category || '?'; cat[c] = (cat[c] || 0) + 1; }});
-      const ct = Object.values(cat).reduce((s, v) => s + v, 0) || 1;
-      html += `<div style="font-size:11px;color:var(--muted);margin:12px 0 6px;">LLM 失败类别 (n=${{llmBucketRes.length}})</div>`;
-      html += Object.entries(cat).sort((a,b) => b[1]-a[1]).map(([name, n]) => {{
-        const pct = n / ct * 100;
-        return `<div class="t2-reason-row">
-          <div class="label">${{escapeHtml(name)}}</div>
-          <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%; background: linear-gradient(90deg,#a855f7,#06b6d4);"></div></div>
-          <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
-        </div>`;
-      }}).join('');
-    }}
-    reasonsEl.innerHTML = html;
-  }} else {{
-    // 1-3 关：只看 LLM
-    const llmBucketRes = (t2LlmResultsCache || []).filter(r => !r.error && r.pass_n === b.level);
-    if (!llmBucketRes.length) {{
-      reasonsEl.innerHTML = '<div style="color: var(--muted); font-size: 12px; padding: 12px;">等 LLM 失败画像跑完……或该桶样本不足。</div>';
-    }} else {{
-      const cat = {{}};
-      llmBucketRes.forEach(r => {{ const c = r.fail_category || '?'; cat[c] = (cat[c] || 0) + 1; }});
-      const ct = Object.values(cat).reduce((s, v) => s + v, 0) || 1;
-      reasonsEl.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">LLM 判定 (n=${{llmBucketRes.length}}, gpt-5.4)</div>` +
-        Object.entries(cat).sort((a,b) => b[1]-a[1]).map(([name, n]) => {{
-          const pct = n / ct * 100;
-          return `<div class="t2-reason-row">
-            <div class="label">${{escapeHtml(name)}}</div>
-            <div class="bar"><div style="width: ${{Math.min(pct, 100)}}%; background: linear-gradient(90deg,#a855f7,#06b6d4);"></div></div>
-            <div class="val">${{n}} · ${{pct.toFixed(0)}}%</div>
-          </div>`;
-        }}).join('');
-    }}
-  }}
-
-  // 右卡：典型 transcript 案例
-  renderT2BucketCases(b);
-}}
-
-function renderT2BucketCases(bucket) {{
-  // 从 DATA.rows 取该桶的真实通话（_human + scope filter + _pass_n === level）
-  // _pass_n 没在 rows 里，需要重新算: 用 _structured 字段 OR 按 _full / _full_with_model + _intent?
-  // 简单办法：用 LLM 结果里 call_id 反查；如果没 LLM 结果，用 _structured 严格线性算 pass_n
-  const inScopeRows = scopedRows().filter(r => r._human);
-  // 计算每行的 pass_n（基于 _structured）
-  const passN = (r) => {{
-    const s = r._structured || {{}};
-    const fb = (s['购车品牌'] || '').trim();
-    const fm = (s['购车型号'] || '').trim();
-    const fc = (s['购车城市'] || '').trim();
-    const ft = (s['购车时间'] || '').trim();
-    const fn = (s['购车姓名'] || '').trim();
-    if (!(fb && fm)) return 0;
-    if (!fc) return 1;
-    if (!ft) return 2;
-    if (!fn) return 3;
-    return 4;
-  }};
-  // 找出该桶的有效会话（assistant>=2 OR 客户开口）的样本——这里简化用 _assistant_turns>=2
-  const sub = inScopeRows.filter(r => passN(r) === bucket.level && r._assistant_turns >= 2);
-  if (!sub.length) {{
-    document.getElementById('t2-bk-cases').innerHTML =
-      '<div style="color:var(--muted); font-size:12px; padding:12px;">该桶无典型 transcript 样本。</div>';
-    return;
-  }}
-  // 按总轮次降序取 5 通最有内容的
-  sub.sort((a, b) => (b._max_turn || 0) - (a._max_turn || 0));
-  const cases = sub.slice(0, 5);
-
-  // 找出每通对应的 LLM 结果（如果有）
-  const llmByCallId = {{}};
-  (t2LlmResultsCache || []).forEach(r => {{ if (r.call_id) llmByCallId[r.call_id] = r; }});
-
-  document.getElementById('t2-bk-cases').innerHTML = cases.map(r => {{
-    const callId = r['Call ID'] || '';
-    const llm = llmByCallId[callId];
-    const failTurnIdx = llm && llm.fail_turn ? parseInt(llm.fail_turn, 10) : null;
-    // Transcript 字段是渲染过的 "role: content" 多行字符串
-    const lines = (r['Transcript'] || '').split('\\n');
-    // 标记 assistant 出问题那句 (按 assistant 出现的第几次)
-    let aCount = 0;
-    const linesHtml = lines.map(line => {{
-      const isAgent = line.startsWith('assistant');
-      if (isAgent) aCount++;
-      const isFail = (isAgent && failTurnIdx && aCount === failTurnIdx);
-      const cls = isAgent ? 'agent' : 'user';
-      const style = isFail
-        ? 'background: rgba(244,63,94,0.12); color: #b91c1c; border-left: 3px solid #f43f5e; padding-left: 6px; font-weight: 600;'
-        : '';
-      const tag = isFail ? '  ⚠️ LLM 判此句出问题' : '';
-      return `<div class="t2-case-line ${{cls}}" style="${{style}}">${{escapeHtml(line)}}${{tag}}</div>`;
-    }}).join('');
-
-    const llmHint = llm && !llm.error
-      ? `<div style="font-size:11px; color:var(--muted); padding:6px 8px; background:var(--panel-2); border-radius:4px; margin-top:6px;">
-          <b style="color:#b91c1c;">LLM 失败类别:</b> ${{escapeHtml(llm.fail_category || '?')}} · <b>原因:</b> ${{escapeHtml(llm.fail_reason || '-')}}<br>
-          <b>客户识破:</b> U${{llm.user_detect_turn || '?'}} · ${{escapeHtml(llm.user_detect_signal || '-')}}
-        </div>` : '';
-
-    return `<details style="border-top: 1px solid var(--border); padding: 6px 8px;">
-      <summary style="cursor: pointer; font-size: 12px;">
-        <code style="background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 10px;">${{callId.slice(-10)}}</code>
-        <span style="color: var(--muted); margin-left: 6px;">${{r['Duration (s)'] || '?'}}s · ${{r._max_turn || '?'}} 轮</span>
-        ${{llm ? `<span style="background: rgba(244,63,94,0.12); color: #b91c1c; padding: 1px 5px; border-radius: 3px; font-size: 10px; margin-left: 6px;">A${{llm.fail_turn || '?'}} ${{escapeHtml(llm.fail_category || '')}}</span>` : ''}}
-      </summary>
-      <div style="font-size: 11px; line-height: 1.7; padding: 8px 0; color: var(--text);">
-        ${{linesHtml}}
-      </div>
-      ${{llmHint}}
-    </details>`;
-  }}).join('');
+  // section 3 (选中桶详情) 已删除, 保留 noop 防 init 时报错;
+  // 点击 bucket 只切换选中视觉.
 }}
 
 function renderT2Efficiency() {{
@@ -2240,8 +2083,20 @@ function renderT2Efficiency() {{
   const o = e.opportunity;
   const c = e.collection;
 
-  // 4 张关键 KPI 卡
+  // 4 张关键 KPI 卡 (从大到小: 基数 → 子集 → 比率 → 效率)
   const cards = [
+    {{
+      label: '有效会话',
+      val: e.n_valid,
+      sub: '基数 (剔除首句挂断 + 接通无应答后)',
+      color: '#06b6d4',
+    }},
+    {{
+      label: '高机会样本',
+      val: o.n_high_chance,
+      sub: `客户开口≥${{o.threshold}}句的通话 (机会大)`,
+      color: '#2563eb',
+    }},
     {{
       label: '机会浪费率',
       val: o.n_high_chance ? `${{o.rate}}%` : '—',
@@ -2253,18 +2108,6 @@ function renderT2Efficiency() {{
       val: c.n_full ? c.slots_per_turn.toFixed(2) : '—',
       sub: c.n_full ? `4 关 / 平均 ${{c.median_turns_full || '?'}} 轮 (中位) · n=${{c.n_full}}` : '无 4 关全过通话',
       color: '#10b981',
-    }},
-    {{
-      label: '高机会样本',
-      val: o.n_high_chance,
-      sub: `客户开口≥${{o.threshold}}句的通话 (机会大)`,
-      color: '#2563eb',
-    }},
-    {{
-      label: '有效会话',
-      val: e.n_valid,
-      sub: '基数 (剔除首句挂断 + 接通无应答后)',
-      color: '#06b6d4',
     }},
   ];
   document.getElementById('t2-eff-stats').innerHTML = cards.map((k, i) => `
@@ -2651,17 +2494,25 @@ function renderT2SentimentReversal(ok) {{
     visualMap: {{ show: false, min: 0, max: maxVal }},
     series: [{{
       type: 'heatmap',
-      data: heatData.map(d => ({{
-        value: d,
-        itemStyle: {{
-          color: cellColor(cats[d[1]], cats[d[0]]),
-          opacity: 0.3 + 0.7 * (d[2] / maxVal),
-        }},
-      }})),
-      label: {{
-        show: true, color: '#fff', fontSize: 14, fontWeight: 600,
-        formatter: p => p.value[2] > 0 ? p.value[2] : '',
-      }},
+      data: heatData.map(d => {{
+        // opacity 范围抬高到 0.5-1.0, 同时低饱和度 cell 用深字, 高饱和度 cell 用白字,
+        // 保证不论深浅都有足够文字对比度.
+        const intensity = d[2] / maxVal;
+        const op = 0.5 + 0.5 * intensity;
+        const labelColor = op >= 0.78 ? '#fff' : '#0f172a';
+        return {{
+          value: d,
+          itemStyle: {{
+            color: cellColor(cats[d[1]], cats[d[0]]),
+            opacity: op,
+          }},
+          label: {{
+            show: true, color: labelColor, fontSize: 15, fontWeight: 700,
+            textBorderColor: 'rgba(255,255,255,0.55)', textBorderWidth: 1,
+            formatter: p => p.value[2] > 0 ? p.value[2] : '',
+          }},
+        }};
+      }}),
     }}],
   }}, true);
 
