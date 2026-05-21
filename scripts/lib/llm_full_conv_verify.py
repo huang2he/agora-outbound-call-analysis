@@ -22,7 +22,7 @@ from typing import Any
 
 # ── Prompt ────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是销售质检专家.
+SYSTEM_PROMPT = """你是销售质检专家. 评判要宽容, 关注 agent 是否扭曲了客户原意, 不要苛求字面一致.
 
 业务的"带车型完整转换"定义:
   系统 SO 同时满足:
@@ -30,17 +30,36 @@ SYSTEM_PROMPT = """你是销售质检专家.
   (2) 购车型号 非空
   (3) 购车城市 / 购车时间 / 购车姓名 三项中至少 2 项 非空
 
-你的任务:
-  Step 1: 重读 transcript, 给系统 SO 中每个非空字段打一个标签:
-    - match: 客户在 transcript 中亲口或明确肯定地表达过, OR
-             客户给了发散性回答, agent 主动用具体词复述/确认, 客户没反驳 (视为客户认可)
-    - invalid: SO 有值但 transcript 找不到合理证据 (凭空填 / 误听 / agent 单方面推断且客户从未回应 / 客户明确反驳)
-    - null: SO 本来就是空
+核心默认规则:
+  *客户不反驳 = 客户认可* — 只要客户没明确反驳/纠正/否定, 都视为认可 agent 的归类.
+  反驳的判定: 客户明确说 "不是"/"不对"/"换一个"/"我说的不是这个" 等否定词. 沉默 / 嗯啊 / 继续配合下一题 都算认可.
 
-  Step 2: 把所有 invalid 字段视为 null, 重新看是否仍满足"品牌+型号+三项任意2"标准, 得出 verdict:
-    - valid:             所有非空字段都 match, 原判完全成立
-    - so_partial_wrong:  有 invalid 字段, 但剔除后仍满足完整转换标准 (即不影响最终判定)
-    - conversion_broken: 剔除 invalid 字段后, 不再满足 (品牌/型号/2 项三选二) 标准, 系统判定不应成立
+字段级标签 (field_check):
+  - match:   客户亲口说过, OR agent 主动归类后客户没反驳 (即默认认可)
+  - invalid: 客户从未提及该字段相关内容 (agent 凭空填), OR 客户明确反驳过 agent 的归类
+  - null:    SO 本来就是空
+
+车型 / 品牌 字段的隐含关系 (重要):
+  购车型号是 match 时, 购车品牌自动视为 match (型号本身蕴含品牌, 不必苛责品牌字段写法).
+  举例: 客户说 "汉兰达" → SO 品牌=汉兰达 / 型号=四驱精英版 也算 ok (汉兰达是车系, 销售场景品牌字段写它合理)
+
+购车时间字段的特别处理:
+  当前日期信息会在 user prompt 顶部以 [CURRENT_DATE: YYYY-MM-DD] 提供, 必须参考.
+  - 客户说的时间字段必须是"未来或当下" (在 CURRENT_DATE 当天或之后), 才能算有效购车意向
+  - 如果客户说 "1月份提车" 但 CURRENT_DATE 是 5 月, 这是已过去的时间, 客户应是无效意向 → invalid
+  - 如果客户说"X月份"或"X个月"或"快了"等表达, agent 主动归类为某个具体时间区间且客户未反驳 → match
+  - "6月份" / "6 个月" / "6 月内" 在销售场景下数字一致 (都指接下来 1-6 个月), agent 归类合理则 match
+
+整体 verdict (Step 2):
+  - valid:             所有非空字段都 match, 原判完全成立
+  - so_partial_wrong:  有 invalid 字段, 但剔除后仍满足 (品牌+型号+三选二)
+  - conversion_broken: 剔除 invalid 后, 不再满足完整转换标准, 系统判定不应成立
+
+new_so 字段提取规则:
+  - new_so 是你"重新从 transcript 提取的客户真实表达", 跟 SO 对错无关
+  - 客户明确表达过 (含 agent 归类+客户未反驳) → 填客户认可的归类值
+  - 原 SO 错了, transcript 里有客户原话 → *必须填客户原话提取值* (不要因为 invalid 就填 null)
+  - 客户从未表达且 transcript 找不到相关字眼 → null
 
 只返回 JSON, 不加 markdown 围栏:
 {
@@ -64,49 +83,32 @@ SYSTEM_PROMPT = """你是销售质检专家.
   }
 }
 
-特别注意 (针对城市 / 时间字段 - 重灾区, 别一刀切判 invalid):
+正反例参考:
 
-  口语化时间表达, 客户说出后 agent 主动用规范词确认, 客户没反驳 = match:
-    客户: "快了" / "等等再说" / "下个月吧" / "国庆前后" / "看看" / "应该挺快的"
-    agent: "那您是计划 3 个月内购车是吗?"
-    客户: "嗯" / "对" / "可以" / "好的" / "差不多" / 沉默并继续配合
-    → 购车时间 = match (客户认可了 agent 的归类)
+  case 1 (购车时间宽容):
+    客户: "合适的话可以是 6 月份" → agent: "6 月份提车" → SO 时间="6个月"
+    判定: field_check.购车时间 = match (客户说的 6 月份, SO 写 6 个月在销售场景同义)
+    new_so.购车时间 = "6 月份"
 
-  口语化城市表达, agent 主动确认, 客户没反驳 = match:
-    客户: "我在那边" / "苏南这边" / "山东这块"
-    agent: "您是在济南吗?"
-    客户: "嗯/对/没错"
-    → 购车城市 = match
+  case 2 (车型蕴含品牌):
+    客户: "汉兰达" 然后 "四驱精英版" → SO 品牌="汉兰达" 型号="四驱精英版"
+    判定: 购车品牌 = match (型号在, 品牌自动 ok, 汉兰达是合理品牌字段值)
+          购车型号 = match (客户原话)
+    new_so.购车品牌 = "汉兰达", new_so.购车型号 = "汉兰达 四驱精英版" 或 "四驱精英版"
 
-  反例 (才是 invalid):
-    - 客户从未提及任何时间/城市相关字眼, agent 凭空填入
-    - agent 确认, 客户明确反驳 ("不是" / "不对" / "换一个" / "我说的不是这个")
-    - agent 单方面陈述, 客户没回应也没继续对话 (突然挂断/沉默)
-
-  其他字段同理: 客户给模糊回答, 但 agent 主动归类 + 客户认可 = match
-
-  品牌/型号/姓名 字段相对刚性, 应该有明确出现, 但同样适用 "agent 主动确认 + 客户认可" 的规则.
-
-new_so 字段提取规则 (重要 - 反面例子见下):
-  - new_so 是你"重新从 transcript 提取的客户真实表达", 跟 SO 的对错无关.
-  - 如果客户明确表达过 (含 agent 确认 + 客户认可), 填客户认可的值
-  - 如果原 SO 错了, transcript 里有客户说的正确值, *必须填正确值* (不要因为 field_check=invalid 就填 null)
-  - 客户从未表达且 transcript 找不到任何相关字眼 → null
-  - 客户给的是模糊词且 agent 没引导规范化 → null
-
-例子: 客户说 "9月份提车", 系统 SO 误填 "9个月"
-  正确返回:
-    field_check.购车时间 = invalid (原 SO 是错的)
-    new_so.购车时间 = "9月份"  ← *不要填 null*, 客户真的说过, 这是你提取的正确值
-  错误返回:
-    field_check.购车时间 = invalid
-    new_so.购车时间 = null     ← 错! 客户其实说了 9 月份, 应该提取出来
+  case 3 (过去时间无效):
+    CURRENT_DATE = 2026-05-21, 客户: "1 月份提车"
+    判定: 购车时间 = invalid (1 月已过, 不可能是未来意向)
+    new_so.购车时间 = null (除非客户后面修正了)
 """
 
 
 def build_user_prompt(transcript_text: str, structured: dict, agent_name: str) -> str:
     so_text = json.dumps(structured, ensure_ascii=False, indent=2)
-    return f"""[Agent] {agent_name}
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    return f"""[CURRENT_DATE: {today}]
+[Agent] {agent_name}
 
 [完整 transcript]
 {transcript_text}
@@ -114,7 +116,7 @@ def build_user_prompt(transcript_text: str, structured: dict, agent_name: str) -
 [系统记录的最终 Structured Output]
 {so_text}
 
-请按 system 指令逐字段打 match/invalid/null, 并给出 verdict."""
+请按 system 指令逐字段打 match/invalid/null, 并给出 verdict. 评判要宽容, 客户不反驳即认可."""
 
 
 # ── LLM 调用 (复用 llm_fail_analysis 的逻辑) ─────────────────────────────

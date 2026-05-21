@@ -197,24 +197,27 @@ def duration_histogram(series: pd.Series, max_x: int) -> tuple[list[str], list[i
 
 
 def early_hangup_rows(df: pd.DataFrame) -> list[dict]:
-    """恰好 N 句挂断（互斥分桶）+ "10s 内首句挂断" 单独一行."""
+    """恰好 N 句挂断（互斥分桶）+ "10s 内首句挂断" 作为 1 句挂断的子集插在第二行."""
     human = df[df["_human"]]
     total = len(human)
     if total == 0:
         return []
     rows = []
-    for n, label in [(1, "首句挂断 (1 句)"), (2, "2 句挂断"), (3, "3 句挂断"), (4, "4 句挂断"), (5, "5 句挂断")]:
-        cnt = int((human["_assistant_turns"] == n).sum())
-        rows.append({"label": label, "count": cnt, "pct": round(cnt / total * 100, 1)})
-    # 新增：首句挂断里时长 < 10 秒的，也就是 agent 开场白还没说完就被切话的硬核 case.
-    # 这个不破坏上面的互斥分桶，单独追加在表底。
+    # 第 1 行: 首句挂断 (1 句)
+    cnt1 = int((human["_assistant_turns"] == 1).sum())
+    rows.append({"label": "首句挂断 (1 句)", "count": cnt1, "pct": round(cnt1 / total * 100, 1)})
+    # 第 2 行: 首句挂断 <10秒 (是 1 句挂断的子集, 缩进展示)
     cnt10 = int(((human["_assistant_turns"] == 1) & (human["Duration (seconds)"] < 10)).sum())
     rows.append({
         "label": "首句挂断 (<10秒)",
         "count": cnt10,
         "pct": round(cnt10 / total * 100, 1),
-        "is_subset": True,   # UI 可识别为"父行的子集统计"展示成缩进
+        "is_subset": True,
     })
+    # 第 3-6 行: 2-5 句挂断
+    for n, label in [(2, "2 句挂断"), (3, "3 句挂断"), (4, "4 句挂断"), (5, "5 句挂断")]:
+        cnt = int((human["_assistant_turns"] == n).sum())
+        rows.append({"label": label, "count": cnt, "pct": round(cnt / total * 100, 1)})
     return rows
 
 
@@ -797,9 +800,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="funnel-wrap">
     <div class="section-row" style="margin-top:0;">
       <h2>1 · 漏斗 <span class="export-hint">点击层级导出</span></h2>
-      <button id="btn-llm-intent" class="llm-btn" title="用大模型重新判定意向客户的真假">
-        <span class="dot"></span>LLM 意向真伪分析
-      </button>
     </div>
     <div class="card"><div id="chart-funnel" class="chart tall"></div></div>
   </div>
@@ -864,8 +864,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px; display:flex; align-items:center; flex-wrap:wrap;">
       首句挂断 · Duration 分布
       <span class="view-toggle" id="fs-view-toggle">
-        <button data-view="all" class="active">全部</button>
-        <button data-view="short">短挂断 (&lt;10秒)</button>
+        <button data-view="all">全部</button>
+        <button data-view="short" class="active">短挂断 (&lt;10秒)</button>
       </span>
       <span class="export-hint" style="margin-left:auto;">点柱导出</span>
     </h3>
@@ -1080,34 +1080,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<div id="llm-modal" class="modal-backdrop">
-  <div class="modal" style="min-width: 460px; max-width: 640px;">
-    <h3>LLM 意向真伪分析</h3>
-    <div class="sub" id="llm-sub"></div>
-    <div id="llm-stage-pre" style="display:none;">
-      <p style="font-size:12px; color:var(--muted); line-height:1.6;" id="llm-pre-text"></p>
-      <div class="modal-actions">
-        <button class="cancel" id="llm-cancel-pre">关闭</button>
-      </div>
-    </div>
-    <div id="llm-stage-running" style="display:none;">
-      <p style="font-size:12px; color:var(--muted); margin: 0 0 10px;">服务端 16 路并行调 LLM，每 5 秒自动刷新。可以关掉弹窗，结果不会丢。</p>
-      <div class="progress" style="display:block;">
-        <div id="llm-progress-text"></div>
-        <div class="bar"><div id="llm-progress-bar"></div></div>
-      </div>
-    </div>
-    <div id="llm-stage-done" style="display:none;">
-      <div class="llm-summary" id="llm-summary"></div>
-      <p style="font-size:11px; color:var(--muted); margin: 4px 0 8px;">每行点开可以看完整 reason + 证据；导出 Excel 含全部字段。</p>
-      <div id="llm-results-table" style="max-height:300px; overflow:auto;"></div>
-      <div class="modal-actions">
-        <button class="cancel" id="llm-close">关闭</button>
-        <button class="primary" id="llm-export">导出 Excel</button>
-      </div>
-    </div>
-  </div>
-</div>
 
 <div id="export-modal" class="modal-backdrop">
   <div class="modal">
@@ -1172,6 +1144,10 @@ function tooltipBase(extra) {{
 // 顶部声明: render 函数在文件早期被调用, 但 LLM verify polling 在文件末尾.
 // 不提前声明会触发 TDZ.
 let convVerifyByCallId = {{}};   // call_id → 'real'|'suspect'|'fake'
+let convVerifyAllResults = [];   // 含 error 的全部 results (用于算"系统记录成单"总数)
+let convVerifyResults = [];      // 整批 verify ok 结果, render() / scope 函数会用
+let convVerifyDone = false;
+let convVerifyFilter = 'problem';
 
 const chartIds = ['chart-funnel',
                   'chart-turn-human', 'chart-turn-human-donut',
@@ -1759,7 +1735,7 @@ function renderDuration(dd) {{
 }}
 
 // View mode for the 首句挂断 · Duration chart: 'all' or 'short' (<10s only).
-let firstSentenceView = 'all';
+let firstSentenceView = 'short';
 
 function firstSentenceData(viewMode) {{
   // Compute the histogram fresh from DATA.rows so the toggle (and any future
@@ -1973,6 +1949,8 @@ function render(key) {{
   renderEarlyHangupTable(d.early_hangup);
   renderFirstSentenceDur();
   renderConvCartHeat(key);
+  // Section 3 (AI 校验) KPI + 表格跟随 agent 过滤
+  if (typeof renderConvVerifyScope === 'function') renderConvVerifyScope();
 }}
 
 // ── 成单热力图 v2 (Heatmap on Cartesian, Section 3) ──
@@ -3017,10 +2995,8 @@ startT2LlmPoll();
 
 // ── 带车型成单真实性校验 (Section 4) ──
 // convVerifyByCallId 已在文件顶部 (chartIds 旁) 提前声明, 避免 TDZ.
-let convVerifyDone = false;
+// convVerifyResults / convVerifyDone / convVerifyFilter 已在文件顶部声明 (避免 TDZ)
 let convVerifyTimer = null;
-let convVerifyResults = [];
-let convVerifyFilter = 'problem';
 
 function renderConvVerifyReport(d) {{
   // 状态条
@@ -3038,18 +3014,30 @@ function renderConvVerifyReport(d) {{
     }}
   }}
 
-  convVerifyResults = (d.results || []).filter(r => !r.error);
+  convVerifyAllResults = d.results || [];
+  convVerifyResults = convVerifyAllResults.filter(r => !r.error);
+  renderConvVerifyScope();
+}}
 
-  // KPI 卡 5 个: 系统原值 + 二次校验真实数 + verdict 三类
-  const total = convVerifyResults.length;
-  const nValid = convVerifyResults.filter(r => r.verdict === 'valid').length;
-  const nPartial = convVerifyResults.filter(r => r.verdict === 'so_partial_wrong').length;
-  const nBroken = convVerifyResults.filter(r => r.verdict === 'conversion_broken').length;
-  // 二次校验后真实成单 = valid + so_partial_wrong (剔除 conversion_broken)
+// 只重算 KPI + 表格 (按 currentAgentKey 过滤), 不动顶部状态文字.
+// 切 agent 时 render() 会调它.
+function renderConvVerifyScope() {{
+  // 用含 error 的 all results 算"系统记录成单" (总数应等于漏斗带车型完整转换)
+  const allScope = (currentAgentKey === DATA.all_key)
+    ? convVerifyAllResults
+    : convVerifyAllResults.filter(r => r.agent_name === currentAgentKey);
+  const scope = allScope.filter(r => !r.error);
+  const totalRecord = allScope.length;     // 系统记录成单 (含 LLM 失败的)
+  const errN = allScope.length - scope.length;
+
+  const nValid = scope.filter(r => r.verdict === 'valid').length;
+  const nPartial = scope.filter(r => r.verdict === 'so_partial_wrong').length;
+  const nBroken = scope.filter(r => r.verdict === 'conversion_broken').length;
   const nVerifiedReal = nValid + nPartial;
-  const pct = (x) => total ? (x/total*100).toFixed(1)+'%' : '—';
+  const pct = (x) => totalRecord ? (x/totalRecord*100).toFixed(1)+'%' : '—';
+  const errSub = errN ? `· ${{errN}} LLM 失败未计入下方比例` : '带车型完整转换原数';
   const cards = [
-    {{ label: '系统记录成单', val: total, sub: '带车型完整转换原数', color: '#0f172a' }},
+    {{ label: '系统记录成单', val: totalRecord, sub: errSub, color: '#0f172a' }},
     {{ label: '✓ 真实成单 (校验后)', val: nVerifiedReal, sub: `${{pct(nVerifiedReal)}} · valid+不影响`, color: '#2563eb' }},
     {{ label: '✓ 原判生效', val: nValid, sub: pct(nValid), color: '#047857' }},
     {{ label: '⚠ 有误但不影响', val: nPartial, sub: pct(nPartial), color: '#b45309' }},
@@ -3064,8 +3052,6 @@ function renderConvVerifyReport(d) {{
         <div class="pct">${{c.sub}}</div>
       </div>`).join('');
   }}
-
-  // 案例列表
   renderConvVerifyTable();
 }}
 
@@ -3166,7 +3152,11 @@ function renderConvVerifyTable() {{
   const wrap = document.getElementById('verify-table-wrap');
   if (!wrap) return;
   const f = convVerifyFilter;
-  let list = convVerifyResults;
+  // table 也按 agent scope 过滤
+  let list = (currentAgentKey === DATA.all_key)
+    ? convVerifyResults
+    : convVerifyResults.filter(r => r.agent_name === currentAgentKey);
+  const scopeTotal = list.length;
   if (f === 'conversion_broken')        list = list.filter(r => r.verdict === 'conversion_broken');
   else if (f === 'so_partial_wrong')    list = list.filter(r => r.verdict === 'so_partial_wrong');
   else if (f === 'valid')               list = list.filter(r => r.verdict === 'valid');
@@ -3175,7 +3165,7 @@ function renderConvVerifyTable() {{
   const rank = {{ conversion_broken: 0, so_partial_wrong: 1, valid: 2 }};
   list = list.slice().sort((a, b) => (rank[a.verdict]||9) - (rank[b.verdict]||9));
 
-  document.getElementById('verify-list-meta').textContent = `${{list.length}} / ${{convVerifyResults.length}} 通`;
+  document.getElementById('verify-list-meta').textContent = `${{list.length}} / ${{scopeTotal}} 通${{currentAgentKey !== DATA.all_key ? ' · 已按 agent 过滤' : ''}}`;
 
   // call_id → conversion (找原数据拿 SO / 录音 url + agent_id)
   const convById = new Map((DATA.conversions || []).map(c => [c.call_id, c]));
@@ -3294,171 +3284,6 @@ document.querySelectorAll('.verify-filter').forEach(btn => {{
 const _origRenderT2All = renderT2All;
 renderT2All = function() {{ _origRenderT2All(); renderT2LlmCharts(); }};
 
-// ──────────────────────────────────────────────────────────────────────────
-// LLM 意向真伪分析
-// ──────────────────────────────────────────────────────────────────────────
-
-const llmModal = document.getElementById('llm-modal');
-const llmSubEl = document.getElementById('llm-sub');
-const llmStagePre = document.getElementById('llm-stage-pre');
-const llmStageRun = document.getElementById('llm-stage-running');
-const llmStageDone = document.getElementById('llm-stage-done');
-const llmProgressText = document.getElementById('llm-progress-text');
-const llmProgressBar = document.getElementById('llm-progress-bar');
-const llmSummaryEl = document.getElementById('llm-summary');
-const llmResultsTable = document.getElementById('llm-results-table');
-
-// Server-side LLM job is auto-kicked off at dashboard start. The modal here is
-// just a viewer that polls /llm-intent-status every 5s while open.
-let llmResults = [];
-let llmPollTimer = null;
-let llmLastModel = '';
-
-function openLLMIntentDialog() {{
-  llmModal.classList.add('show');
-  llmStagePre.style.display = 'none';
-  llmStageRun.style.display = 'block';
-  llmStageDone.style.display = 'none';
-  llmProgressBar.style.width = '0%';
-  llmProgressText.textContent = '加载中…';
-  llmSubEl.innerHTML = '查询服务端状态…';
-  pollLLMStatus();
-  if (!llmPollTimer) {{
-    llmPollTimer = setInterval(pollLLMStatus, 5000);
-  }}
-}}
-
-function closeLLMModal() {{
-  llmModal.classList.remove('show');
-  if (llmPollTimer) {{ clearInterval(llmPollTimer); llmPollTimer = null; }}
-}}
-
-async function pollLLMStatus() {{
-  try {{
-    const resp = await fetch('/llm-intent-status');
-    if (!resp.ok) return;
-    const data = await resp.json();
-    renderLLMStatus(data);
-    if (data.status === 'done' || data.status === 'error' || data.status === 'skipped') {{
-      if (llmPollTimer) {{ clearInterval(llmPollTimer); llmPollTimer = null; }}
-    }}
-  }} catch (e) {{
-    // Transient errors are fine — next tick will retry.
-  }}
-}}
-
-function renderLLMStatus(data) {{
-  llmLastModel = data.model || llmLastModel;
-  const scope = buildScopeName();
-  const inScopeIds = new Set(scopedRows().filter(r => r._intent).map(r => r['Call ID']));
-  const scopedResults = (data.results || []).filter(r => inScopeIds.has(r.call_id));
-  llmResults = scopedResults;
-
-  llmSubEl.innerHTML = `模型 <code style="background:var(--panel-2);padding:1px 5px;border-radius:3px;">${{data.model || '-'}}</code> · scope <b>${{scope}}</b> · 当前 scope 意向客户 <b>${{inScopeIds.size}}</b>`;
-
-  if (data.status === 'skipped') {{
-    llmStagePre.style.display = 'block';
-    llmStageRun.style.display = 'none';
-    llmStageDone.style.display = 'none';
-    document.getElementById('llm-pre-text').innerHTML = `<span style="color:#b45309;">LLM 自动分析未启动：${{data.error || '未知原因'}}</span>`;
-    return;
-  }}
-
-  if (data.status === 'error') {{
-    llmStagePre.style.display = 'block';
-    llmStageRun.style.display = 'none';
-    llmStageDone.style.display = 'none';
-    document.getElementById('llm-pre-text').innerHTML = `<span style="color:#b91c1c;">分析出错: ${{data.error || 'unknown'}}</span>`;
-    return;
-  }}
-
-  if (data.status === 'running' || data.status === 'idle') {{
-    llmStagePre.style.display = 'none';
-    llmStageRun.style.display = 'block';
-    llmStageDone.style.display = 'none';
-    const total = data.total || 1;
-    const pct = (data.done / total * 100).toFixed(1);
-    llmProgressBar.style.width = pct + '%';
-    llmProgressText.textContent = `全局进度: ${{data.done}} / ${{data.total}}  · 已 ${{data.elapsed_s}}s`;
-    // Also surface partial results table even mid-flight, so user sees real-time output.
-    showLLMResults(true);
-    return;
-  }}
-
-  // done
-  llmStageRun.style.display = 'none';
-  showLLMResults(false);
-}}
-
-function showLLMResults(midflight) {{
-  if (!midflight) llmStageRun.style.display = 'none';
-  llmStageDone.style.display = 'block';
-  // Summary chips
-  const counts = {{ '真意向': 0, '假意向': 0, '模糊': 0, '失败': 0 }};
-  for (const r of llmResults) {{
-    if (r.error) counts['失败']++;
-    else if (counts[r.verdict] !== undefined) counts[r.verdict]++;
-    else counts['模糊']++;
-  }}
-  const total = llmResults.length || 1;
-  llmSummaryEl.innerHTML = `
-    <div class="chip real"><div class="ct">${{counts['真意向']}}</div><div class="lb">真意向 · ${{(counts['真意向']/total*100).toFixed(0)}}%</div></div>
-    <div class="chip fake"><div class="ct">${{counts['假意向']}}</div><div class="lb">假意向 · ${{(counts['假意向']/total*100).toFixed(0)}}%</div></div>
-    <div class="chip mid"><div class="ct">${{counts['模糊']}}</div><div class="lb">模糊 · ${{(counts['模糊']/total*100).toFixed(0)}}%</div></div>
-    ${{counts['失败'] ? `<div class="chip err"><div class="ct">${{counts['失败']}}</div><div class="lb">调用失败</div></div>` : ''}}
-  `;
-  // Results table
-  llmResultsTable.innerHTML = `<table style="font-size:11px;"><thead><tr>
-    <th>Call ID</th><th>判定</th><th>依据</th><th>证据</th></tr></thead><tbody>${{
-    llmResults.map(r => {{
-      const v = r.error ? '⚠ 失败' : (r.verdict || '?');
-      const color = r.error ? '#b91c1c' :
-                    r.verdict === '真意向' ? '#047857' :
-                    r.verdict === '假意向' ? '#b91c1c' : '#b45309';
-      return `<tr>
-        <td><code style="font-size:10px; background:var(--panel-2); padding:1px 4px; border-radius:3px;">${{(r.call_id || '').slice(-8)}}</code></td>
-        <td style="color:${{color}}; font-weight:600;">${{v}}</td>
-        <td>${{r.error || r.reason || ''}}</td>
-        <td style="color:var(--muted);">${{r.evidence || ''}}</td>
-      </tr>`;
-    }}).join('')
-  }}</tbody></table>`;
-}}
-
-function exportLLMResults() {{
-  // Join results back to source rows so the xlsx has the full pic.
-  const byId = new Map(scopedRows().filter(r => r._intent).map(r => [r['Call ID'], r]));
-  const cols = ['Call ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
-                'LLM Verdict', 'LLM Reason', 'LLM Evidence', 'LLM Error',
-                'Is Full Conversion', 'Assistant turns', 'Transcript', 'Audio URL'];
-  const aoa = [cols];
-  for (const r of llmResults) {{
-    const src = byId.get(r.call_id) || {{}};
-    aoa.push([
-      r.call_id,
-      src['Agent Name'] || '',
-      src['Duration (s)'] ?? '',
-      src['Hangup Reason'] || '',
-      r.verdict || '',
-      r.reason || '',
-      r.evidence || '',
-      r.error || '',
-      src['Is Full Conversion'] ?? '',
-      src['Assistant turns'] ?? '',
-      src['Transcript'] || '',
-      src['Audio URL'] || '',
-    ]);
-  }}
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [16, 28, 8, 16, 8, 36, 36, 24, 8, 10, 60, 28].map(w => ({{ wch: w }}));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'llm-intent');
-  const fname = exportFilename(`llm-intent-${{buildScopeName()}}`, llmResults.length, 'xlsx');
-  XLSX.writeFile(wb, fname);
-  showToast(`导出 ${{llmResults.length}} 条 → ${{fname}}`);
-}}
-
-document.getElementById('btn-llm-intent').addEventListener('click', openLLMIntentDialog);
 document.getElementById('llm-cancel-pre').addEventListener('click', closeLLMModal);
 document.getElementById('llm-close').addEventListener('click', closeLLMModal);
 document.getElementById('llm-export').addEventListener('click', exportLLMResults);
