@@ -784,7 +784,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div id="chart-conv-heatmap" class="chart" style="height: 320px; width: 100%;"></div>
 </div>
 
-<h2>3 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<div class="section-row" style="margin-top: 18px;">
+  <h2 style="margin: 0;">3 · 成单热力图 <span style="color:var(--muted);font-weight:400;font-size:12px;margin-left:6px;">· Heatmap on Cartesian · Agent × 时段</span></h2>
+  <span class="view-toggle" id="conv-cart-bucket-toggle" style="margin-left: 12px;">
+    <button data-bucket="10" class="active">10 分钟</button>
+    <button data-bucket="20">20 分钟</button>
+  </span>
+</div>
+<p class="section-note">
+  X = 时段, Y = Agent, cell 颜色深浅 = 该 agent 该时段的成单数。点格子查看该格内成单 SO 列表。
+</p>
+<div class="card">
+  <div id="chart-conv-cart-heat" class="chart" style="height: 240px; width: 100%;"></div>
+  <div id="conv-cart-cell-detail" style="font-size: 12px; color: var(--muted); padding: 6px 4px 0; min-height: 18px;"></div>
+</div>
+
+<h2>4 · 轮次分布 (max turn_id, 真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：<b>max turn_id 同时包含 agent 和真人两方的轮次</b>（assistant + user 共享 turn_id 序号）。三张图分别看每个子集的轮次构成，左边柱状（绝对数量），右边环形（每根柱子在该子集里的占比）。</p>
 
 <div class="turn-card">
@@ -809,11 +824,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<h2>4 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
+<h2>5 · Duration 分布 (真人接听) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">横轴单位 <b>秒</b>（一秒一柱）；拖动下方滑块或滚轮缩放查看任意区间。点单根柱子导出该秒数对应的真人接听通话。</p>
 <div class="card"><div id="chart-duration" class="chart tall"></div></div>
 
-<h2>5 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
+<h2>6 · 完整转换槽位分布 (真人接听内) <span class="export-hint">点击柱子导出</span></h2>
 <p class="section-note">备注：4 个槽位 — <b>车型</b> (购车品牌 或 购车型号 任一非 null) · <b>时间</b> · <b>城市</b> · <b>姓名</b>。<b>≥ 3 个填齐</b> 算完整转换。购车意向 不计入槽位，是独立漏斗分支。</p>
 <div class="turn-card">
   <div class="turn-card-body">
@@ -823,7 +838,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 <div class="card" id="full-conv-drill" style="margin-top:8px;"></div>
 
-<h2>6 · 早期挂断（真人接听内 · 互斥分桶）</h2>
+<h2>7 · 早期挂断（真人接听内 · 互斥分桶）</h2>
 <div class="grid-2">
   <div class="card">
     <h3 style="margin:0 0 6px; font-size:12px; color:var(--muted); font-weight:500; text-transform: uppercase; letter-spacing:0.6px;">分句数汇总 <span class="export-hint">点行导出</span></h3>
@@ -1096,6 +1111,7 @@ const chartIds = ['chart-funnel',
                   'chart-duration', 'chart-first-sentence-dur',
                   'chart-field-count', 'chart-field-count-donut',
                   'chart-conv-heatmap',
+                  'chart-conv-cart-heat',
                   't2-chart-sankey',
                   't2-chart-waste', 't2-chart-firstword',
                   't2-chart-fail-turn', 't2-chart-detect-turn', 't2-chart-fail-cat',
@@ -1876,6 +1892,145 @@ function render(key) {{
   renderEarlyHangupTable(d.early_hangup);
   renderFirstSentenceDur();
   renderConvHeatmap(key);
+  renderConvCartHeat(key);
+}}
+
+// ── 成单热力图 v2 (Heatmap on Cartesian, Section 3) ──
+// X = 时段 (10 或 20 分钟可切换), Y = Agent, value = 该 (agent, 时段) 成单数
+let convCartBucketMin = 10;
+function renderConvCartHeat(key) {{
+  const chart = charts['chart-conv-cart-heat'];
+  if (!chart) return;
+  const all = DATA.conversions || [];
+  const conv = (key === DATA.all_key) ? all : all.filter(c => c.agent === key);
+  const detailEl = document.getElementById('conv-cart-cell-detail');
+  if (detailEl) detailEl.textContent = '';
+
+  if (!conv.length) {{
+    chart.clear();
+    chart.setOption({{ title: {{ text: '当前 scope 无带车型完整转换', left:'center', top:'middle', textStyle: {{color: MUTED, fontSize: 13}} }} }});
+    return;
+  }}
+  const BUCKET_MS = convCartBucketMin * 60 * 1000;
+  const bucketStart = ms => Math.floor(ms / BUCKET_MS) * BUCKET_MS;
+  const bucketLabel = ms => {{
+    const d = new Date(ms);
+    return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  }};
+  const agents = [...new Set(all.map(c => c.agent))].sort();
+  const visibleAgents = (key === DATA.all_key) ? agents : [key];
+  const allMs = conv.map(c => c.bjt_ms).filter(Boolean);
+  if (!allMs.length) {{ chart.clear(); return; }}
+  const minMs = bucketStart(Math.min(...allMs));
+  const maxMs = bucketStart(Math.max(...allMs));
+  const buckets = [];
+  for (let m = minMs; m <= maxMs; m += BUCKET_MS) buckets.push(m);
+  const xLabels = buckets.map(b => `${{bucketLabel(b)}}~${{bucketLabel(b + BUCKET_MS)}}`);
+
+  // (agentIdx, bucketIdx) → list[conv]
+  const cellMap = {{}};
+  conv.forEach(c => {{
+    if (!c.bjt_ms) return;
+    const bi = buckets.indexOf(bucketStart(c.bjt_ms));
+    const ai = visibleAgents.indexOf(c.agent);
+    if (bi < 0 || ai < 0) return;
+    const k = bi + '_' + ai;
+    (cellMap[k] ||= []).push(c);
+  }});
+  const heatData = [];
+  // 所有 cell (含 0 单), 让 visualMap 着色
+  visibleAgents.forEach((a, ai) => {{
+    buckets.forEach((_, bi) => {{
+      const list = cellMap[bi + '_' + ai] || [];
+      heatData.push({{ value: [bi, ai, list.length], conv: list }});
+    }});
+  }});
+  const maxVal = Math.max(...heatData.map(d => d.value[2]), 1);
+
+  // tooltip: 该 cell 内所有成单 SO
+  const tipFormatter = p => {{
+    const list = p.data.conv || [];
+    const ai = p.data.value[1], bi = p.data.value[0];
+    const aShort = visibleAgents[ai].length > 28 ? visibleAgents[ai].slice(0,26)+'…' : visibleAgents[ai];
+    const head = `<b>${{aShort}}</b> · ${{xLabels[bi]}}<br><b>${{list.length}} 个成单</b>`
+               + (list.length ? '<div style="height:1px;background:#e2e8f0;margin:6px 0;"></div>' : '');
+    if (!list.length) return head;
+    const items = list.slice(0, 8).map(c => {{
+      const s = c.structured || {{}};
+      const time = (c.bjt || '').slice(11, 19);
+      return `<div style="margin-bottom:4px; line-height:1.4;">
+        <span style="color:#0f172a;font-weight:600;">${{time}}</span>
+        <span style="color:#64748b;font-size:11px;"> · ${{c.duration_s}}s</span>
+        · <span style="color:#2563eb;">${{s['购车品牌']||''}} ${{s['购车型号']||''}}</span>
+        ${{s['购车城市'] ? `· ${{s['购车城市']}}` : ''}}
+        ${{s['购车姓名'] ? `· <b>${{s['购车姓名']}}</b>` : ''}}
+      </div>`;
+    }}).join('');
+    const more = list.length > 8 ? `<div style="color:#94a3b8;font-size:11px;">... 还有 ${{list.length - 8}} 个</div>` : '';
+    return head + items + more;
+  }};
+
+  chart.setOption({{
+    tooltip: tooltipBase({{
+      position: 'top', enterable: true,
+      extraCssText: 'max-width: 360px; max-height: 360px; overflow-y: auto;',
+      formatter: tipFormatter,
+    }}),
+    grid: {{ left: 12, right: 24, top: 16, bottom: 72, containLabel: true }},
+    xAxis: {{
+      type: 'category', data: xLabels,
+      axisLabel: {{
+        color: MUTED, fontSize: 10, rotate: 45,
+        interval: xLabels.length > 24 ? 'auto' : (xLabels.length > 12 ? 1 : 0),
+      }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitArea: {{ show: true }},
+    }},
+    yAxis: {{
+      type: 'category',
+      data: visibleAgents.map(a => a.length > 28 ? a.slice(0,26)+'…' : a),
+      axisLabel: {{ color: MUTED, fontSize: 11 }},
+      axisLine: {{ lineStyle: {{ color: BORDER }} }},
+      axisTick: {{ show: false }},
+      splitArea: {{ show: true }},
+    }},
+    visualMap: {{
+      min: 0, max: maxVal,
+      calculable: true, orient: 'horizontal',
+      left: 'center', bottom: 4,
+      itemWidth: 12, itemHeight: 120,
+      inRange: {{ color: ['#f1f5f9', '#bfdbfe', '#60a5fa', '#2563eb', '#1e3a8a'] }},
+      textStyle: {{ color: MUTED, fontSize: 10 }},
+    }},
+    series: [{{
+      type: 'heatmap', data: heatData,
+      label: {{
+        show: true, color: '#0f172a', fontSize: 11, fontWeight: 600,
+        textBorderColor: 'rgba(255,255,255,0.7)', textBorderWidth: 1.5,
+        formatter: p => p.data.value[2] > 0 ? p.data.value[2] : '',
+      }},
+      itemStyle: {{ borderColor: '#fff', borderWidth: 1 }},
+      emphasis: {{ itemStyle: {{ shadowBlur: 8, shadowColor: 'rgba(37,99,235,0.45)' }} }},
+    }}],
+  }}, true);
+
+  // 点击 cell 显示详情到下面的 div
+  chart.off('click');
+  chart.on('click', p => {{
+    if (!p.data || !p.data.conv) return;
+    const list = p.data.conv;
+    if (!list.length) {{
+      if (detailEl) detailEl.textContent = '该格无成单';
+      return;
+    }}
+    if (!detailEl) return;
+    const items = list.map(c => {{
+      const s = c.structured || {{}};
+      return `${{(c.bjt||'').slice(11,16)}} · ${{s['购车品牌']||''}}${{s['购车型号']||''}}${{s['购车城市'] ? ' · '+s['购车城市'] : ''}}${{s['购车姓名'] ? ' · '+s['购车姓名'] : ''}}`;
+    }}).join(' / ');
+    detailEl.innerHTML = `<b>选中:</b> ${{visibleAgents[p.data.value[1]].slice(-20)}} · ${{xLabels[p.data.value[0]]}} · ${{list.length}} 单 · <span style="color:var(--text);">${{items}}</span>`;
+  }});
 }}
 
 // ── 成单热力图 / 散点 (Tab 1 Section 2) ──
@@ -2041,6 +2196,19 @@ document.getElementById('fs-view-toggle').addEventListener('click', e => {{
     b.classList.toggle('active', b.getAttribute('data-view') === view);
   }});
   renderFirstSentenceDur();
+}});
+
+// 成单热力图 v2 (cartesian) 时段切换
+document.getElementById('conv-cart-bucket-toggle').addEventListener('click', e => {{
+  const btn = e.target.closest('button[data-bucket]');
+  if (!btn) return;
+  const m = parseInt(btn.getAttribute('data-bucket'), 10);
+  if (m === convCartBucketMin) return;
+  convCartBucketMin = m;
+  document.querySelectorAll('#conv-cart-bucket-toggle button').forEach(b => {{
+    b.classList.toggle('active', parseInt(b.getAttribute('data-bucket'),10) === m);
+  }});
+  renderConvCartHeat(currentAgentKey);
 }});
 
 charts['chart-duration'].on('click', p => {{
