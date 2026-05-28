@@ -145,8 +145,37 @@ def collected_field_count(structured: dict | None) -> int:
     return len(filled_slots(structured))
 
 
+def _parse_set_name(labels_str) -> str | None:
+    """从 labels JSON 列里抽 _set_name (A/B/C/... 等 A/B 测试分组键).
+    labels 例: {"_exp_id":"convoai_cn/20260526_gk_abtest","_set_name":"B"}
+    解析失败 / 没这字段 → 返回 None.
+    """
+    if not labels_str or not isinstance(labels_str, str):
+        return None
+    s = labels_str.strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+        v = obj.get("_set_name")
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # 如果原 CSV 有 labels 列 (A/B 测试场景), 用 _set_name 覆盖 Agent Name
+    # 这样下游所有按 'Agent Name' 分组的逻辑自动按 set 区分 (Tab 1 下拉 / Tab 2 桶 / LLM 校验等).
+    if "labels" in df.columns:
+        set_names = df["labels"].apply(_parse_set_name)
+        df["_set_name"] = set_names           # 原值留一份用于导出
+        df["Agent Name"] = set_names.where(set_names.notna(), df.get("Agent Name", ""))
+    else:
+        df["_set_name"] = None
     df["_transcript"] = df["Transcript"].apply(parse_transcript)
     df["_structured"] = df["Structured Output"].apply(parse_structured)
     df["_assistant_turns"] = df["_transcript"].apply(assistant_turn_count)
@@ -360,6 +389,7 @@ def row_for_export(row: pd.Series) -> dict:
     return {
         "Call ID": row.get("Call ID", ""),
         "Switch Call ID": row.get("Switch Call ID", ""),
+        "Set Name": row.get("_set_name") or "",
         "Agent ID": row.get("Agent ID", ""),
         "Agent Name": row.get("Agent Name", ""),
         "Duration (s)": int(row["Duration (seconds)"]),
@@ -1222,7 +1252,7 @@ const SERVER_MODE = (window.location.protocol === 'http:' || window.location.pro
   }}
 }})();
 
-const EXCEL_COLS = ['Call ID', 'Switch Call ID', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
+const EXCEL_COLS = ['Call ID', 'Switch Call ID', 'Set Name', 'Agent ID', 'Agent Name', 'Duration (s)', 'Hangup Reason',
                     'Max turn_id', 'Assistant turns', 'Is Human Answered', 'Is Full Conversion',
                     'Is Intent', 'Structured Output', 'Transcript', 'Audio URL'];
 
