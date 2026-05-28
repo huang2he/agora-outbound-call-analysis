@@ -471,6 +471,13 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
             "audio_url": str(r.get("Audio Record File Download URL", "") or ""),
         })
 
+    # 用户 AI 感知分析 (纯规则 / 关键词字典 / 不调 LLM)
+    try:
+        from lib import ai_perception
+    except ImportError:
+        from scripts.lib import ai_perception
+    ai_perception_data = ai_perception.compute(df_enriched)
+
     return {
         "options": [{"key": ALL_KEY, "label": f"{ALL_LABEL} (n={len(df_enriched)})"}]
         + [{"key": a, "label": f"{a} (n={datasets[a]['n']})"} for a in agents],
@@ -479,6 +486,7 @@ def build_data(df_enriched: pd.DataFrame) -> dict:
         "all_key": ALL_KEY,
         "tab2": tab2,
         "conversions": conversions,
+        "ai_perception": ai_perception_data,
     }
 
 
