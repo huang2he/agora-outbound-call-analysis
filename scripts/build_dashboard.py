@@ -831,6 +831,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="overview">产品总览</button>
   <button class="tab-btn" data-tab="agent">Agent 视角 (KDA)</button>
+  <button class="tab-btn" data-tab="perception">用户 AI 感知</button>
 </div>
 
 <div id="tab-overview" class="tab-content active">
@@ -1115,6 +1116,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
 </div><!-- /tab-agent -->
+
+<div id="tab-perception" class="tab-content">
+  <div class="defs" style="margin-bottom: 12px;">
+    Tab 3 看的是: <b>真人接听里, 用户是否意识到自己在和 AI 通话</b>. 全部纯规则匹配 (关键词字典 + 字段重复计数), 不调 LLM, 即时算.
+  </div>
+
+  <h2>1 · 漏斗</h2>
+  <div class="card">
+    <div id="ap-funnel"></div>
+  </div>
+
+  <h2>2 · A-I 九维信号</h2>
+  <p class="section-note">每张卡 = 一个分类 + 命中次数 + 占有效对话比例 + 关键词命中分布。</p>
+  <div id="ap-cats-grid" class="stats" style="grid-template-columns: repeat(3, 1fr); gap: 12px;"></div>
+
+  <h2>3 · 合计去重</h2>
+  <div class="card" id="ap-hero" style="padding: 22px 26px; display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;"></div>
+
+  <div class="section-row" style="margin-top: 32px;">
+    <h2 style="margin: 0;">4 · 命中案例</h2>
+    <span id="ap-filter-bar" style="margin-left: 12px; display: inline-flex; flex-wrap: wrap; gap: 4px;"></span>
+  </div>
+  <div class="card">
+    <div id="ap-cases-list"></div>
+  </div>
+</div><!-- /tab-perception -->
 
 <div id="toast" class="toast"></div>
 
@@ -2650,6 +2677,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {{
         renderT2All();
         renderT2LlmCharts();
       }}
+      if (btn.dataset.tab === 'perception' && typeof renderTab3 === 'function') {{
+        renderTab3();
+      }}
     }}, 60);
   }});
 }});
@@ -2658,6 +2688,190 @@ if (T2) {{
   renderT2AgentSelect();
   renderT2All();
 }}
+
+// ── Tab 3 · 用户 AI 感知分析 (纯规则) ───────────────────────────────
+const AP_CAT_COLORS = {{ A:'#2563eb', B:'#d97706', C:'#7c4dff', D:'#dc2626', E:'#059669', F:'#0891b2', G:'#be123c', H:'#92400e', I:'#475569' }};
+const AP_CAT_LABELS = {{
+  A: ['A 关键字',    '口头识破'],
+  B: ['B 豪车 prank','报奢侈品牌'],
+  C: ['C 偏离主线',  '反问 agent 个人'],
+  D: ['D 情绪/重复', '不耐烦+反复问'],
+  E: ['E 转人工',    '主动要求真人'],
+  F: ['F 测试问题',  '探 AI 边界'],
+  G: ['G 粗鲁谩骂',  '国骂/侮辱'],
+  H: ['H 技术异常',  '感知卡顿/信号'],
+  I: ['I 沉默压力',  '≤1 句 user / ≥8 句 agent'],
+}};
+let apFilter = 'all';
+
+function _apScopedData() {{
+  // 全 scope = DATA.ai_perception (后端已算好). 切到 agent scope 时, 客户端按 agent_name 过滤 hit_cases.
+  // 简化版: 先支持"全部"和"按当前 agent"两种 (重算分类计数).
+  const ap = DATA.ai_perception || {{}};
+  const all = ap.hit_cases || [];
+  if (currentAgentKey === DATA.all_key) return {{ ap, hits: all }};
+  const hits = all.filter(c => c.agent_name === currentAgentKey);
+  return {{ ap, hits }};
+}}
+
+function renderTab3() {{
+  const {{ ap, hits }} = _apScopedData();
+  // 1. 漏斗
+  const fnEl = document.getElementById('ap-funnel');
+  if (fnEl) {{
+    const f = ap.funnel || {{}};
+    const total = f['拨打'] || 1;
+    const colors = {{ '拨打':'#94a3b8', '接听':'#5fb4ff', '真人接听':'#2563eb', '有效对话':'#0479c9', '用户明显感知 AI':'#ea580c' }};
+    fnEl.innerHTML = Object.entries(f).map(([k, v]) => {{
+      const pct = (v/total*100).toFixed(1);
+      const w = pct + '%';
+      return `<div style="position:relative; margin-bottom: 6px; height: 30px;">
+        <div style="background:${{colors[k]||'#94a3b8'}}; opacity:0.18; height:100%; width:${{w}}; border-radius:5px;"></div>
+        <div style="position:absolute; inset:0 12px; display:flex; align-items:center; gap:12px;">
+          <span style="flex:1; font-weight:500;">${{escapeHtml(k)}}</span>
+          <span style="font-family:monospace; font-weight:700;">${{v.toLocaleString()}}</span>
+          <span style="width:60px; text-align:right; color:var(--muted); font-family:monospace; font-size:11.5px;">${{pct}}%</span>
+        </div>
+      </div>`;
+    }}).join('');
+  }}
+
+  // 2. A-I 9 张卡 (根据 scope 重算)
+  const byCat = (currentAgentKey === DATA.all_key) ? (ap.by_category || {{}}) : _apRecalcByCat(hits);
+  const nValid = ap.funnel ? ap.funnel['有效对话'] : 1;
+  const gridEl = document.getElementById('ap-cats-grid');
+  if (gridEl) {{
+    gridEl.innerHTML = 'ABCDEFGHI'.split('').map(cat => {{
+      const info = byCat[cat] || {{ count: 0 }};
+      const [pill, sub] = AP_CAT_LABELS[cat];
+      const color = AP_CAT_COLORS[cat];
+      const count = info.count || 0;
+      const pct = (count / Math.max(nValid, 1) * 100).toFixed(2);
+      let subRows = '';
+      if (info.keywords && Object.keys(info.keywords).length) {{
+        const maxV = Math.max(...Object.values(info.keywords));
+        subRows = Object.entries(info.keywords).slice(0, 7).map(([k, v]) =>
+          `<div style="display:grid; grid-template-columns:1fr 1fr 28px; gap:6px; margin:3px 0; font-size:10.5px;">
+            <span>${{escapeHtml(k)}}</span>
+            <div style="height:5px; background:var(--panel-2); border-radius:3px; overflow:hidden;">
+              <div style="height:100%; background:${{color}}; opacity:0.55; width:${{(v/maxV*100).toFixed(0)}}%;"></div>
+            </div>
+            <span style="font-family:monospace; text-align:right; font-weight:700;">${{v}}</span>
+          </div>`).join('');
+      }}
+      let subcatLine = '';
+      if (cat === 'D' && info.subcat) {{
+        subcatLine = `<div style="font-size:10.5px; color:var(--muted); margin:3px 0 5px;">D1:${{info.subcat.D1||0}} · D2:${{info.subcat.D2||0}}</div>`;
+        if (info.field_keywords) {{
+          const fk = info.field_keywords;
+          const maxV = Math.max(...Object.values(fk), 1);
+          subRows = Object.entries(fk).slice(0, 5).map(([k, v]) =>
+            `<div style="display:grid; grid-template-columns:1fr 1fr 28px; gap:6px; margin:3px 0; font-size:10.5px;">
+              <span>${{escapeHtml(k)}}</span>
+              <div style="height:5px; background:var(--panel-2); border-radius:3px; overflow:hidden;">
+                <div style="height:100%; background:${{color}}; opacity:0.55; width:${{(v/maxV*100).toFixed(0)}}%;"></div>
+              </div>
+              <span style="font-family:monospace; text-align:right; font-weight:700;">${{v}}</span>
+            </div>`).join('');
+        }}
+      }}
+      if (cat === 'G' && info.subcat) {{
+        const items = Object.entries(info.subcat).filter(([_,v]) => v);
+        subcatLine = `<div style="font-size:10.5px; color:var(--muted); margin:3px 0 5px;">${{items.map(([k,v])=>`${{k}}:${{v}}`).join(' · ')}}</div>`;
+      }}
+      return `<div class="card" style="padding:13px 15px;">
+        <span style="display:inline-block; padding:2px 8px; border-radius:999px; font-size:10.5px; font-weight:700; letter-spacing:0.05em; background:${{color}}22; color:${{color}};">${{pill}}</span>
+        <div style="font-size:12.5px; font-weight:600; margin:6px 0 3px;">${{sub}}</div>
+        <div style="font-size:24px; font-weight:800; line-height:1; color:${{color}}; font-variant-numeric:tabular-nums; margin:5px 0;">${{count}}</div>
+        <div style="color:var(--muted); font-size:11px; font-family:monospace; margin-bottom:8px;">${{pct}}%</div>
+        ${{subcatLine}}
+        ${{subRows}}
+      </div>`;
+    }}).join('');
+  }}
+
+  // 3. hero 合计
+  const heroEl = document.getElementById('ap-hero');
+  if (heroEl) {{
+    const n = hits.length;
+    const pct = (n / Math.max(nValid, 1) * 100).toFixed(2);
+    heroEl.innerHTML = `<span style="font-size:52px; font-weight:800; color:#ea580c; font-variant-numeric:tabular-nums;">${{n}}</span>
+      <span style="color:var(--muted); font-size:14px;">通用户对 agent 是 AI 这件事有明显感知<br>(A-I 任一命中)</span>
+      <span style="margin-left:auto; font-size:22px; font-weight:700; color:#0479c9; font-family:monospace;">${{pct}}%</span>
+      <span style="color:var(--muted); font-size:13px;">占 ${{nValid}} 有效对话</span>`;
+  }}
+
+  // 4. filter bar
+  const fbEl = document.getElementById('ap-filter-bar');
+  if (fbEl) {{
+    const cats = [['all', '全部', hits.length]].concat('ABCDEFGHI'.split('').map(c => {{
+      const n = hits.filter(h => h.hit_categories.includes(c)).length;
+      return [c, AP_CAT_LABELS[c][0], n];
+    }}).filter(([_,_n,n]) => n > 0));
+    fbEl.innerHTML = cats.map(([key, label, n]) => `
+      <button class="ap-fbtn" data-ap-cat="${{key}}"
+        style="background:${{key===apFilter?(AP_CAT_COLORS[key]||'#2563eb'):'var(--panel-2)'}}; color:${{key===apFilter?'#fff':'var(--text)'}}; border:1px solid var(--border); padding:4px 11px; border-radius:5px; cursor:pointer; font-size:12px;">
+        ${{escapeHtml(label)}} <span style="font-family:monospace; font-size:11px; opacity:0.8; margin-left:3px;">${{n}}</span>
+      </button>`).join('');
+    fbEl.querySelectorAll('.ap-fbtn').forEach(b => b.addEventListener('click', () => {{
+      apFilter = b.dataset.apCat;
+      renderTab3();
+    }}));
+  }}
+
+  // 5. 案例列表
+  const listEl = document.getElementById('ap-cases-list');
+  if (listEl) {{
+    const filtered = apFilter === 'all' ? hits : hits.filter(h => h.hit_categories.includes(apFilter));
+    if (!filtered.length) {{
+      listEl.innerHTML = '<div style="color:var(--muted); padding: 16px; text-align: center; font-size: 12px;">当前筛选下没有命中案例</div>';
+      return;
+    }}
+    listEl.innerHTML = filtered.slice(0, 200).map(c => {{
+      const tags = c.hit_categories.map(cat =>
+        `<span style="background:${{AP_CAT_COLORS[cat]}}22; color:${{AP_CAT_COLORS[cat]}}; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; margin-right:4px;">${{cat}}</span>`
+      ).join('');
+      const evidence = Object.entries(c.evidence || {{}}).map(([cat, ev]) => {{
+        const parts = [];
+        if (ev.keywords && ev.keywords.length) parts.push('命中: ' + ev.keywords.join(' / '));
+        if (ev.field_counts) {{
+          const fk = Object.entries(ev.field_counts).filter(([_,v]) => v>=2).map(([k,v])=>`${{k}}×${{v}}`);
+          if (fk.length) parts.push('反复问: ' + fk.join(' / '));
+        }}
+        if (ev.subcats) parts.push('子类: ' + Object.keys(ev.subcats).join(' / '));
+        if (ev.u_turns != null) parts.push(`u=${{ev.u_turns}} a=${{ev.a_turns}}`);
+        return parts.length ? `<div style="font-size:11px; color:var(--muted); margin: 2px 0;"><b style="color:${{AP_CAT_COLORS[cat]}};">${{cat}}</b>: ${{parts.join(' · ')}}</div>` : '';
+      }}).join('');
+      const audio = c.audio_url ? `<audio controls preload="none" src="${{escapeHtml(c.audio_url)}}" style="height:28px; width:180px; margin-left:8px;"></audio>` : '';
+      return `<div style="border-bottom:1px solid var(--border); padding: 10px 4px; display: flex; align-items: flex-start; gap: 12px;">
+        <div style="flex:1; min-width: 0;">
+          <div style="margin-bottom: 4px;">${{tags}}
+            <code style="background:var(--panel-2); padding:1px 5px; border-radius:3px; font-size:10px; font-family:monospace;">${{(c.call_id||'').slice(-10)}}</code>
+            <span style="color:var(--muted); font-size:11px; margin-left:6px;">${{c.duration_s}}s · ${{escapeHtml((c.agent_name||'').slice(0, 28))}}</span>
+            <button data-tx-call="${{escapeHtml(c.call_id||'')}}" title="看 transcript"
+              style="background:none; border:1px solid var(--border); color:var(--muted); width:24px; height:22px; border-radius:4px; cursor:pointer; font-size:12px; padding:0; margin-left:6px;">👁</button>
+          </div>
+          ${{evidence}}
+        </div>
+        ${{audio}}
+      </div>`;
+    }}).join('');
+    listEl.querySelectorAll('button[data-tx-call]').forEach(b =>
+      b.addEventListener('click', () => openTranscriptModal(b.dataset.txCall)));
+  }}
+}}
+
+// agent scope 重算 by_category (只用当前 scope 的 hits 简化算)
+function _apRecalcByCat(hits) {{
+  const out = {{}};
+  'ABCDEFGHI'.split('').forEach(c => out[c] = {{ count: 0, keywords: {{}}, subcat: c==='D' ? {{D1:0, D2:0}} : (c==='G' ? {{}} : null) }});
+  hits.forEach(h => h.hit_categories.forEach(c => {{ out[c].count = (out[c].count||0) + 1; }}));
+  return out;
+}}
+
+// 切 agent 时 Tab 3 也要更新
+const _origRender3 = render;
+render = function(key) {{ _origRender3(key); if (document.getElementById('tab-perception')?.classList.contains('active')) renderTab3(); }};
 
 // ── Tab 2 · LLM 失败画像（轮询 /llm-fail-status）──
 // t2LlmResultsCache 已在文件顶部声明 (避免 TDZ)
@@ -3486,10 +3700,7 @@ document.getElementById('verify-export-zip').addEventListener('click', async () 
 const _origRenderT2All = renderT2All;
 renderT2All = function() {{ _origRenderT2All(); renderT2LlmCharts(); }};
 
-document.getElementById('llm-cancel-pre').addEventListener('click', closeLLMModal);
-document.getElementById('llm-close').addEventListener('click', closeLLMModal);
-document.getElementById('llm-export').addEventListener('click', exportLLMResults);
-llmModal.addEventListener('click', e => {{ if (e.target === llmModal) closeLLMModal(); }});
+// (旧 LLM 意向真伪 modal 早已删除, 此处死代码也一并清理)
 
 // ECharts locks the canvas size at init() time. Flex/grid layouts (like the
 // hero+funnel split where the funnel card stretches to match the left KPI
